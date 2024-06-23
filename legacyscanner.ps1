@@ -31,7 +31,21 @@ function Main {
     $solutionAudit 
 }
 
-function HasProperty ([System.Object]$object, [string]$propertyName) {
+function Get-PackagesConfig([System.IO.FileInfo]$projectCsproj) {
+    Get-ChildItem -Path $projectCsproj.Directory -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
+}
+
+function Test-LegacyNugetProject([System.IO.FileInfo]$projectCsproj) {
+    $packageReferences = [xml](Get-Content -Path $projectCsproj.FullName) `
+    | Select-Xml -XPath './/PackageReference' `
+    | Select-Object -ExpandProperty Node
+
+    $packagesConfig = Get-PackagesConfig $projectCsproj
+
+    return $packageReferences.Count -eq 0 -and $packagesConfig
+}
+
+function Test-HasProperty([System.Object]$object, [string]$propertyName) {
     return [bool](Get-Member -InputObject $object -Name $propertyName -MemberType Properties)
 }
 
@@ -134,17 +148,15 @@ class VulnerabilityAuditor {
     }
 
     [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile) {
-        $projectPaths = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
-        $solutionParentDir = $solutionFile.Directory.Parent.FullName
-        $projectAudits = $projectPaths | ForEach-Object {
-            $projectCsproj = Join-Path -Path $solutionParentDir -ChildPath $_
-            $this.RunProjectAudit($projectCsproj)
+        $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
+        $projectAudits = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } | ForEach-Object {
+            $this.RunProjectAudit($_)
         }
         return New-Object SolutionAudit $solutionFile, $projectAudits
     }
 
     [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj) {
-        $packagesConfig = Get-ChildItem -Path $projectCsproj.Directory -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
+        $packagesConfig = Get-PackagesConfig $projectCsproj
         $packages = [xml](Get-Content $packagesConfig.FullName) | Select-Xml -XPath './/package' | Select-Object -ExpandProperty Node
         $audits = $packages | ForEach-Object {
             $audit = $this.RunPackageAudit($_.id, $_.version)
@@ -163,7 +175,7 @@ class VulnerabilityAuditor {
 
     hidden static [Vulnerability[]]SearchInData([System.Object]$data, [string]$packageName, [version]$packageVersion) {
         $vulnerabilities = New-Object Collections.Generic.List[Vulnerability]
-        if (HasProperty -object $data -propertyName $packageName) {
+        if (Test-HasProperty -object $data -propertyName $packageName) {
             $data.$packageName | ForEach-Object {
                 $vrange = [VersionRange]::Parse($_.versions)
                 $vulnerability = New-Object Vulnerability $_.severity, $_.url, $vrange
@@ -178,9 +190,11 @@ class VulnerabilityAuditor {
     hidden static [string[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
         $content = Get-Content -Path $solutionFile.FullName -Raw
         $allMatches = ([regex]'Project.*= (?<project>".*").*"{.*}"\sEndProject').Matches($content)
+        $solutionParentDir = $solutionFile.Directory.Parent.FullName
         $paths = $allMatches | ForEach-Object {
             ([string]$name, [string]$path) = ($_.Groups['project'].Value).Split(',')
-            $path.Replace('"', '').Trim()
+            $path = $path.Replace('"', '').Trim()
+            Join-Path -Path $solutionParentDir -ChildPath $path
         }
         return $paths
     }
