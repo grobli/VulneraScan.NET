@@ -50,22 +50,15 @@ class SolutionAudit {
     [string]$LeafName
     [string]$SolutionName
     [ProjectAudit[]]$LegacyProjects
-    [int]$Count
-    [int]$LowCount
-    [int]$ModerateCount
-    [int]$HighCount
-    [int]$CriticalCount
+    [VulnerabilityCount]$Count
 
     SolutionAudit([System.IO.DirectoryInfo]$solutionDirectory, [ProjectAudit[]]$audits) {
         $this.FullPath = $solutionDirectory.FullName
         $this.LeafName = $solutionDirectory.BaseName
         $this.SolutionName = Get-ChildItem -Path $SolutionDirectory -Filter *.sln | Select-Object -Index 0
         $this.LegacyProjects = $audits
-        $audits | ForEach-Object { $this.Count += $_.Count }
-        $audits | ForEach-Object { $this.LowCount += $_.LowCount }
-        $audits | ForEach-Object { $this.ModerateCount += $_.ModerateCount }
-        $audits | ForEach-Object { $this.HighCount += $_.HighCount }
-        $audits | ForEach-Object { $this.CriticalCount += $_.CriticalCount }
+        $counts = $audits | Select-Object -ExpandProperty Count
+        $this.Count = [VulnerabilityCount]::SumCounts($counts)
     }
 }
 
@@ -74,42 +67,59 @@ class ProjectAudit {
     [string]$LeafName
     [string]$ProjectName
     [PackageAudit[]]$VulnerablePackages
-    [int]$Count
-    [int]$LowCount
-    [int]$ModerateCount
-    [int]$HighCount
-    [int]$CriticalCount
+    [VulnerabilityCount]$Count
 
     ProjectAudit([System.IO.FileInfo]$packagesConfig, [PackageAudit[]]$audits) {
         $this.FullPath = $packagesConfig.Directory.FullName
         $this.LeafName = $packagesConfig.Directory.BaseName
         $this.ProjectName = Get-ChildItem -Path $this.FullPath -Filter *.csproj | Select-Object -Index 0
         $this.VulnerablePackages = $audits
-        $audits | ForEach-Object { $this.Count += $_.Count }
-        $audits | ForEach-Object { $this.LowCount += $_.LowCount }
-        $audits | ForEach-Object { $this.ModerateCount += $_.ModerateCount }
-        $audits | ForEach-Object { $this.HighCount += $_.HighCount }
-        $audits | ForEach-Object { $this.CriticalCount += $_.CriticalCount }
+        $counts = $audits | Select-Object -ExpandProperty Count
+        $this.Count = [VulnerabilityCount]::SumCounts($counts)
     }
 }
 
 class PackageAudit {
     [string]$PackageName
+    [string]$PackageVersion
     [Vulnerability[]]$Vulnerabilities 
-    [int]$Count
-    [int]$LowCount
-    [int]$ModerateCount
-    [int]$HighCount
-    [int]$CriticalCount
+    [VulnerabilityCount]$Count
 
-    PackageAudit([string]$name, [Vulnerability[]]$vulnerabilities) {
+    PackageAudit([string]$name, [version]$version, [Vulnerability[]]$vulnerabilities) {
         $this.PackageName = $name
+        $this.PackageVersion = $version
         $this.Vulnerabilities = $vulnerabilities
-        $this.Count = $this.Vulnerabilities.Count
-        $this.LowCount = ($this.Vulnerabilities | Where-Object { $_.Severity -eq [Severity]::Low }).Count
-        $this.ModerateCount = ($this.Vulnerabilities | Where-Object { $_.Severity -eq [Severity]::Moderate }).Count
-        $this.HighCount = ($this.Vulnerabilities | Where-Object { $_.Severity -eq [Severity]::High }).Count
-        $this.CriticalCount = ($this.Vulnerabilities | Where-Object { $_.Severity -eq [Severity]::Critical }).Count
+        $this.Count = [VulnerabilityCount]::Create($this.Vulnerabilities)
+    }
+}
+
+class VulnerabilityCount {
+    [int]$Total
+    [int]$Low
+    [int]$Moderate
+    [int]$High
+    [int]$Critical
+
+    static [VulnerabilityCount]Create([Vulnerability[]]$vulnerabilities) {
+        $count = [VulnerabilityCount]::new()
+        $count.Total = $vulnerabilities.Count
+        $count.Low = ($vulnerabilities | Where-Object { $_.Severity -eq [Severity]::Low }).Count
+        $count.Moderate = ($vulnerabilities | Where-Object { $_.Severity -eq [Severity]::Moderate }).Count
+        $count.High = ($vulnerabilities | Where-Object { $_.Severity -eq [Severity]::High }).Count
+        $count.Critical = ($vulnerabilities | Where-Object { $_.Severity -eq [Severity]::Critical }).Count
+        return $count
+    }
+
+    static[VulnerabilityCount]SumCounts([VulnerabilityCount[]]$counts) {
+        $count = [VulnerabilityCount]::new()
+        $counts | ForEach-Object {
+            $count.Total += $_.Total
+            $count.Low += $_.Low
+            $count.Moderate += $_.Moderate
+            $count.High += $_.High
+            $count.Critical += $_.Critical
+        }
+        return $count
     }
 }
 
@@ -146,7 +156,7 @@ class VulnerabilityAuditor {
                 $audits.Add($audit)
             }
         }
-        return New-Object ProjectAudit $_, $audits
+        return New-Object ProjectAudit $packagesConfig, $audits
     }
 
     [PackageAudit]RunPackageAudit([string]$packageName, [version]$packageVersion) {
@@ -156,7 +166,7 @@ class VulnerabilityAuditor {
         # search in Update
         $vUpdate = [VulnerabilityAuditor]::SearchInData($this.Update, $packageName, $packageVersion)
 
-        return New-Object PackageAudit $packageName, $($vBase; $vUpdate)
+        return New-Object PackageAudit $packageName, $packageVersion, $($vBase; $vUpdate)
     }
 
     static [Vulnerability[]]SearchInData([System.Object]$data, [string]$packageName, [version]$packageVersion) {
