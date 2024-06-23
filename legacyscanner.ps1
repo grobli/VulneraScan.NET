@@ -1,22 +1,21 @@
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true)][string]$SolutionDirectory,
+    [Parameter(Mandatory = $true)][System.IO.FileInfo]$SolutionFile,
     [Parameter()][ValidateSet('json', 'xml')]$OutputTo
 )
 
 function Main {
-    if (!(Test-Path -Path $SolutionDirectory -PathType Container)) {
-        throw "Provided path does not exist or is not directory: $SolutionDirectory"
+    if (!(Test-Path -Path $SolutionFile -PathType Leaf)) {
+        throw "Provided path does not exist or is not a file: $SolutionFile"
     }
 
-    $solutionFile = Get-ChildItem -Path $SolutionDirectory -Filter *.sln 
-    if (!$solutionFile) {
-        throw "Provided directory does not contain solution file: $SolutionDirectory"
+    if ($SolutionFile.Extension -ne '.sln') {
+        $extension = $SolutionFile.Extension
+        throw "Provided file is not solution file. Invalid file extension - expected: '.sln' but received: '$extension'"
     }
 
     $auditor = [VulnerabilityAuditor]::new()
-
-    $solutionAudit = $auditor.RunSolutionAudit($SolutionDirectory)
+    $solutionAudit = $auditor.RunSolutionAudit($SolutionFile)
 
     $depth = 6
     if ($OutputTo -eq 'json') {
@@ -45,17 +44,16 @@ enum Severity {
     Critical = 3
 }
 
+
 class SolutionAudit {
-    [string]$FullPath
-    [string]$LeafName
     [string]$SolutionName
+    [string]$FullPath
     [ProjectAudit[]]$LegacyProjects
     [VulnerabilityCount]$Count
 
-    SolutionAudit([System.IO.DirectoryInfo]$solutionDirectory, [ProjectAudit[]]$audits) {
-        $this.FullPath = $solutionDirectory.FullName
-        $this.LeafName = $solutionDirectory.BaseName
-        $this.SolutionName = Get-ChildItem -Path $SolutionDirectory -Filter *.sln | Select-Object -Index 0
+    SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$audits) {
+        $this.FullPath = $solutionFile.FullName
+        $this.SolutionName = $solutionFile.Name
         $this.LegacyProjects = $audits
         $counts = $audits | Select-Object -ExpandProperty Count
         $this.Count = [VulnerabilityCount]::SumCounts($counts)
@@ -63,16 +61,14 @@ class SolutionAudit {
 }
 
 class ProjectAudit {
-    [string]$FullPath
-    [string]$LeafName
     [string]$ProjectName
+    [string]$FullPath
     [PackageAudit[]]$VulnerablePackages
     [VulnerabilityCount]$Count
 
-    ProjectAudit([System.IO.FileInfo]$packagesConfig, [PackageAudit[]]$audits) {
-        $this.FullPath = $packagesConfig.Directory.FullName
-        $this.LeafName = $packagesConfig.Directory.BaseName
-        $this.ProjectName = Get-ChildItem -Path $this.FullPath -Filter *.csproj | Select-Object -Index 0
+    ProjectAudit([System.IO.FileInfo]$projectCsproj, [PackageAudit[]]$audits) {
+        $this.FullPath = $projectCsproj.FullName
+        $this.ProjectName = $projectCsproj.Name
         $this.VulnerablePackages = $audits
         $counts = $audits | Select-Object -ExpandProperty Count
         $this.Count = [VulnerabilityCount]::SumCounts($counts)
@@ -124,9 +120,9 @@ class VulnerabilityCount {
 }
 
 class VulnerabilityAuditor {
-    [string]$NugetVulnerabilityIndexUrl
-    [System.Object]$Base
-    [System.Object]$Update
+    hidden [string]$NugetVulnerabilityIndexUrl
+    hidden [System.Object]$Base
+    hidden [System.Object]$Update
 
     VulnerabilityAuditor() {
         $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
@@ -137,41 +133,36 @@ class VulnerabilityAuditor {
         $this.Update = Invoke-RestMethod ($index | Where-Object -Property '@name' -eq update).'@id'
     }
 
-    [SolutionAudit]RunSolutionAudit([System.IO.DirectoryInfo]$solutionDirectory) {
-        $projectAudits = New-Object Collections.Generic.List[ProjectAudit]
-        $packagesConfigFilePaths = Get-ChildItem -Path $solutionDirectory -Filter 'packages.config' -Recurse -ErrorAction SilentlyContinue -Force
-        $packagesConfigFilePaths | ForEach-Object {
-            $projectAudit = $this.RunProjectAudit($_)
-            $projectAudits.Add($projectAudit)
+    [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile) {
+        $projectPaths = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
+        $solutionParentDir = $solutionFile.Directory.Parent.FullName
+        $projectAudits = $projectPaths | ForEach-Object {
+            $projectCsproj = Join-Path -Path $solutionParentDir -ChildPath $_
+            $this.RunProjectAudit($projectCsproj)
         }
-        return New-Object SolutionAudit $solutionDirectory, $projectAudits
+        return New-Object SolutionAudit $solutionFile, $projectAudits
     }
 
-    [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$packagesConfig) {
+    [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj) {
+        $packagesConfig = Get-ChildItem -Path $projectCsproj.Directory -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
         $packages = [xml](Get-Content $packagesConfig.FullName) | Select-Xml -XPath './/package' | Select-Object -ExpandProperty Node
-        $audits = New-Object Collections.Generic.List[PackageAudit]
-        $packages | ForEach-Object {
+        $audits = $packages | ForEach-Object {
             $audit = $this.RunPackageAudit($_.id, $_.version)
             if ($audit.Vulnerabilities.Count -gt 0) {
-                $audits.Add($audit)
+                $audit
             }
         }
-        return New-Object ProjectAudit $packagesConfig, $audits
+        return New-Object ProjectAudit $projectCsproj, $audits
     }
 
     [PackageAudit]RunPackageAudit([string]$packageName, [version]$packageVersion) {
-        # search in Base
         $vBase = [VulnerabilityAuditor]::SearchInData($this.Base, $packageName, $packageVersion)
-        
-        # search in Update
         $vUpdate = [VulnerabilityAuditor]::SearchInData($this.Update, $packageName, $packageVersion)
-
         return New-Object PackageAudit $packageName, $packageVersion, $($vBase; $vUpdate)
     }
 
-    static [Vulnerability[]]SearchInData([System.Object]$data, [string]$packageName, [version]$packageVersion) {
+    hidden static [Vulnerability[]]SearchInData([System.Object]$data, [string]$packageName, [version]$packageVersion) {
         $vulnerabilities = New-Object Collections.Generic.List[Vulnerability]
-
         if (HasProperty -object $data -propertyName $packageName) {
             $data.$packageName | ForEach-Object {
                 $vrange = [VersionRange]::Parse($_.versions)
@@ -182,6 +173,16 @@ class VulnerabilityAuditor {
             }    
         } 
         return $vulnerabilities.ToArray()
+    }
+
+    hidden static [string[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
+        $content = Get-Content -Path $solutionFile.FullName -Raw
+        $allMatches = ([regex]'Project.*= (?<project>".*").*"{.*}"\sEndProject').Matches($content)
+        $paths = $allMatches | ForEach-Object {
+            ([string]$name, [string]$path) = ($_.Groups['project'].Value).Split(',')
+            $path.Replace('"', '').Trim()
+        }
+        return $paths
     }
 }
 
@@ -203,8 +204,8 @@ class VersionRange {
     [bool]$IsMinInclusive
     [bool]$IsMaxInclusive
 
-    static [version]$DefaultMin = [version]'0.0.0'
-    static [version]$DefaultMax = [version]'9999.9999.9999'
+    hidden static [version]$DefaultMin = [version]'0.0.0'
+    hidden static [version]$DefaultMax = [version]'9999.9999.9999'
 
     VersionRange() {
         $this.Min = [VersionRange]::DefaultMin
@@ -234,7 +235,7 @@ class VersionRange {
         return $vrange     
     }
 
-    static [string]NormalizeVersionString([string]$versionString) {
+    hidden static [string]NormalizeVersionString([string]$versionString) {
         $versionString = $versionString.Replace('(', '')
         $versionString = $versionString.Replace('[', '')
         $versionString = $versionString.Replace(')', '')
