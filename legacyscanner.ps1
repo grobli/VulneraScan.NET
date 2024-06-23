@@ -131,6 +131,15 @@ class VulnerabilityCount {
         }
         return $count
     }
+
+    [string]ToString() {
+        $totalVal = $this.Total
+        $lowVal = $this.Low
+        $moderateVal = $this.Moderate
+        $highVal = $this.High
+        $criticalVal = $this.Critical
+        return "$totalVal = (L:$lowVal M:$moderateVal H:$highVal C:$criticalVal)"
+    }
 }
 
 class VulnerabilityAuditor {
