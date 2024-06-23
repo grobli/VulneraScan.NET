@@ -148,7 +148,7 @@ class VulnerabilityAuditor {
         $packages = [xml](Get-Content $packagesConfig.FullName) | Select-Xml -XPath './/package' | Select-Object -ExpandProperty Node
         $audits = $packages | ForEach-Object {
             $audit = $this.RunPackageAudit($_.id, $_.version)
-            if ($audit.Vulnerabilities.Count -gt 0) {
+            if ($audit.Count.Total -gt 0) {
                 $audit
             }
         }
