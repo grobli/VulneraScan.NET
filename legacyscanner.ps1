@@ -19,12 +19,12 @@ function Main {
 
     $depth = 6
     if ($OutputTo -eq 'json') {
-        Write-Output $solutionAudit | ConvertTo-Json -Depth $depth -Compress
+        $solutionAudit | ConvertTo-Json -Depth $depth -Compress
         return
     }
 
     if ($OutputTo -eq 'xml') {
-        Write-Output $solutionAudit | ConvertTo-Xml -Depth $depth -As String
+        $solutionAudit | ConvertTo-Xml -Depth $depth -As String
         return
     }
 
