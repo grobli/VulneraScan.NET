@@ -7,8 +7,11 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)][string]$SolutionPath,
-    [Parameter()][ValidateSet('json', 'xml')]$OutputTo,
-    [Parameter()][switch]$Recurse
+    [Parameter()][ValidateSet('json', 'xml')]$Format,
+    [Parameter()][switch]$Recurse,
+    [Parameter()][switch]$BuildBreaker,
+    [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
+    [Parameter()][switch]$FindPatched
 )
 
 <# 
@@ -72,24 +75,31 @@ $CustomDefinitions = {
         Critical = 3
     }
 
+    #region Vulnerability
     class Vulnerability {
+        [string]$GhsaId
         [Severity]$Severity
-        [string]$AdvisoryUrl
         [VersionRange]$VersionRange
+        [string]$AdvisoryUrl
     
         Vulnerability([int]$severity, [string]$url, [VersionRange]$vrange) {
             $this.Severity = $severity
             $this.AdvisoryUrl = $url
+            $lastIndexOfUriSeparator = $this.AdvisoryUrl.LastIndexOf('/') + 1
+            $this.GhsaId = $this.AdvisoryUrl.Substring($lastIndexOfUriSeparator)
             $this.VersionRange = $vrange
         }
 
         Vulnerability([psobject]$serialized) {
             $this.Severity = $serialized.Severity
             $this.AdvisoryUrl = $serialized.AdvisoryUrl
+            $this.GhsaId = $serialized.GhsaId
             $this.VersionRange = $serialized.VersionRange
         }
     }
+    #endregion
 
+    #region SolutionAuditPlural
     class SolutionAuditPlural {
         [SolutionAudit[]]$Solutions
         [VulnerabilityCount]$VulnerabilityCount
@@ -100,7 +110,9 @@ $CustomDefinitions = {
             $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
         }
     }
+    #endregion
     
+    #region SolutionAudit
     class SolutionAudit {
         [string]$SolutionName
         [VulnerabilityCount]$VulnerabilityCount
@@ -122,7 +134,9 @@ $CustomDefinitions = {
             $this.VulnerabilityCount = $serialized.VulnerabilityCount
         }
     }
+    #endregion
     
+    #region ProjectAudit
     class ProjectAudit {
         [string]$ProjectName
         [VulnerabilityCount]$VulnerabilityCount
@@ -144,13 +158,24 @@ $CustomDefinitions = {
             $this.VulnerabilityCount = $serialized.VulnerabilityCount
         }
     }
-    
+    #endregion
+
+    #region PackageAudit
     class PackageAudit {
         [string]$PackageName
         [string]$PackageVersion
+        [string]$FirstPatchedVersion
         [VulnerabilityCount]$VulnerabilityCount
-        [Vulnerability[]]$Vulnerabilities 
-    
+        [Vulnerability[]]$Vulnerabilities
+
+        PackageAudit([string]$name, [version]$version, [Vulnerability[]]$vulnerabilities, [string]$firstPatchedVersion) {
+            $this.PackageName = $name
+            $this.PackageVersion = $version
+            $this.Vulnerabilities = $vulnerabilities
+            $this.FirstPatchedVersion = $firstPatchedVersion
+            $this.VulnerabilityCount = [VulnerabilityCount]::Create($this.Vulnerabilities)
+        }
+
         PackageAudit([string]$name, [version]$version, [Vulnerability[]]$vulnerabilities) {
             $this.PackageName = $name
             $this.PackageVersion = $version
@@ -163,9 +188,12 @@ $CustomDefinitions = {
             $this.PackageVersion = $serialized.PackageVersion
             $this.Vulnerabilities = $serialized.Vulnerabilities
             $this.VulnerabilityCount = $serialized.VulnerabilityCount
+            $this.FirstPatchedVersion = $serialized.FirstPatchedVersion
         }
     }
+    #endregion
     
+    #region VulnerabilityCount
     class VulnerabilityCount {
         [int]$Total
         [int]$Low
@@ -204,6 +232,13 @@ $CustomDefinitions = {
             }
             return $count
         }
+
+        [int]GetTotalFromLevel([Severity]$severityLevel) {
+            if ($severityLevel -eq [Severity]::Low) { return $this.Total }
+            if ($severityLevel -eq [Severity]::Moderate) { return $this.Moderate + $this.High + $this.Critical }
+            if ($severityLevel -eq [Severity]::High) { return $this.High + $this.Critical }
+            return $this.Critical
+        }
     
         [string]ToString() {
             $totalVal = $this.Total
@@ -215,15 +250,18 @@ $CustomDefinitions = {
         }
     }
     #endregion
+    #endregion
     
     #region VulnerabilityAuditor
     class VulnerabilityAuditor {
         hidden [string]$NugetVulnerabilityIndexUrl
         hidden [System.Object]$Base
         hidden [System.Object]$Update
+        hidden [hashtable]$AdvisoriesCache
 
         VulnerabilityAuditor() {
             $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
+            $this.AdvisoriesCache = @{}
 
             $index = Invoke-RestMethod $this.NugetVulnerabilityIndexUrl
 
@@ -237,20 +275,20 @@ $CustomDefinitions = {
             $this.Update = $serialized.Update
         }
 
-        [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile) {
+        [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatched) {
             $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
             $projectAudits = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } | ForEach-Object {
-                $this.RunProjectAudit($_)
+                $this.RunProjectAudit($_, $findPatched)
             }
             return [SolutionAudit]::new($solutionFile, $projectAudits)
         }
     
-        [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj) {
+        [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatched) {
             $packagesConfig = Get-PackagesConfig $projectCsproj
             $packages = [xml](Get-Content $packagesConfig.FullName) | Select-Xml -XPath './/package' | Select-Object -ExpandProperty Node
             $audits = $packages | ForEach-Object {
                 $version = Convert-NormalizedVersionString $_.version
-                $audit = $this.RunPackageAudit($_.id, $version)
+                $audit = $this.RunPackageAudit($_.id, $version, $findPatched)
                 if ($audit.VulnerabilityCount.Total -gt 0) {
                     $audit
                 }
@@ -258,10 +296,35 @@ $CustomDefinitions = {
             return [ProjectAudit]::new($projectCsproj, $audits)
         }
     
-        [PackageAudit]RunPackageAudit([string]$packageName, [version]$packageVersion) {
+        [PackageAudit]RunPackageAudit([string]$packageName, [version]$packageVersion, [bool]$findPatched) {
             $vBase = [VulnerabilityAuditor]::SearchInData($this.Base, $packageName, $packageVersion)
             $vUpdate = [VulnerabilityAuditor]::SearchInData($this.Update, $packageName, $packageVersion)
-            return [PackageAudit]::new($packageName, $packageVersion, $($vBase; $vUpdate))
+            $allVulnerabilities = $($vBase; $vUpdate)
+
+            if ($allVulnerabilities.Count -gt 0 -and $findPatched) {
+                $patchedVersion = $this.FindPatchedVersion($allVulnerabilities)
+                return [PackageAudit]::new($packageName, $packageVersion, $allVulnerabilities, $patchedVersion)
+            }
+            return [PackageAudit]::new($packageName, $packageVersion, $allVulnerabilities)
+        }
+
+        hidden [string]FindPatchedVersion([Vulnerability[]]$vulnerabilities) {
+            $patchedVersions = $vulnerabilities | ForEach-Object {
+                if ($this.AdvisoriesCache.ContainsKey($_.GhsaId)) {
+                    $advisoryData = $this.AdvisoriesCache[$_.GhsaId]
+                }
+                else {
+                    $advisoryData = Invoke-RestMethod $_.AdvisoryUrl.Replace('github', 'api.github')
+                    $this.AdvisoriesCache[$_.GhsaId] = $advisoryData
+                }
+
+                $advisoryData `
+                | Select-Object -ExpandProperty vulnerabilities `
+                | Where-Object { $_.package.ecosystem -eq 'nuget' } `
+                | Select-Object -ExpandProperty first_patched_version `
+                | ForEach-Object { [version](Convert-NormalizedVersionString $_) } `
+            }
+            return ($patchedVersions | Sort-Object -Descending)[0]
         }
     
         hidden static [Vulnerability[]]SearchInData([System.Object]$data, [string]$packageName, [version]$packageVersion) {
@@ -379,25 +442,23 @@ function Format-AuditResult($AuditResult) {
         $Depth = 8
     }
 
-    if ($OutputTo -eq 'json') {
-        $AuditResult | ConvertTo-Json -Depth $Depth -Compress
-        return
+    if ($Format -eq 'json') {
+        return $AuditResult | ConvertTo-Json -Depth $Depth -Compress 
     }
     
-    if ($OutputTo -eq 'xml') {
-        $AuditResult | ConvertTo-Xml -Depth $Depth -As String
-        return
+    if ($Format -eq 'xml') {
+        return $AuditResult | ConvertTo-Xml -Depth $Depth -As String
     }
     
     $AuditResult
 }
 
-function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions) {
+function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions, [Parameter(Mandatory = $false)][bool]$FindPatchedVersion) {
     $auditor = [VulnerabilityAuditor]::new()
 
     if ($Solutions.Count -eq 1) {
-        $result = $auditor.RunSolutionAudit($Solutions[0])
-        return Format-AuditResult $result
+        $result = $auditor.RunSolutionAudit($Solutions[0], $FindPatchedVersion)
+        $result
     }  
 
     try {
@@ -412,7 +473,7 @@ function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions) {
             . $customDefinitions
     
             [VulnerabilityAuditor]$a = $auditorObject
-            $audit = $a.RunSolutionAudit($path)
+            $audit = $a.RunSolutionAudit($path, $using:FindPatchedVersion)
     
             ConvertTo-StandardObject $audit
         }
@@ -424,12 +485,10 @@ function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions) {
     }
     catch {
         # if Start-ThreadJob not found then fallback to sequential execution - Start-Job is to heavy
-        $results = $Solutions | ForEach-Object {
-            $auditor.RunSolutionAudit($_)
-        }
+        $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_, $FindPatchedVersion) }
     }   
 
-    return Format-AuditResult $results
+    return $results
 }
 #endregion
 
@@ -446,18 +505,31 @@ if (Test-Path -Path $SolutionPath -PathType Leaf) {
         throw "Provided file is not solution file. Invalid file extension - expected: '.sln' but received: '$extension'"
     }
     $auditor = [VulnerabilityAuditor]::new()
-    return Format-AuditResult $auditor.RunSolutionAudit($slnFile)
+    $finalResult = $auditor.RunSolutionAudit($slnFile, $FindPatched)
 }
-
-if ($Recurse) {
+elseif ($Recurse) {
     $solutionPaths = @(Get-ChildItem -Path $SolutionPath -Filter *.sln -Recurse -Force -ErrorAction SilentlyContinue)
-    return Invoke-ScannerInParallel -Solutions $solutionPaths 
+    $finalResult = Invoke-ScannerInParallel -Solutions $solutionPaths -FindPatchedVersion $FindPatched
+}
+else {
+    $auditor = [VulnerabilityAuditor]::new()
+    $slnFile = Get-ChildItem -Path $SolutionPath -Filter *.sln -Force -ErrorAction SilentlyContinue
+    if ($null -eq $slnFile) {
+        throw "Provided directory does not contain solution file. Use command with: '-Recurse' switch to search for all solutions in directory tree"
+    }
+    if ($slnFile -is [System.Collections.ICollection]) {
+        $files = [string]::Join(', ', $slnFile)
+        throw "Provided directory contains multiple solution files ($files). Specify solution file directly or use command with: '-Recurse' switch to search for all solutions in directory tree"
+    }
+    $finalResult = $auditor.RunSolutionAudit($slnFile, $FindPatched)
 }
 
-$auditor = [VulnerabilityAuditor]::new()
-$slnFile = Get-ChildItem -Path $SolutionPath -Filter *.sln -Force -ErrorAction SilentlyContinue
-if ($null -eq $slnFile) {
-    throw "Provided directory does not contain solution file. Use command with: '-Recurse' switch to search for all solutions in directory tree"
+Format-AuditResult $finalResult
+
+if ($BuildBreaker) {
+    if ($null -eq $MinimumBreakLevel -and $finalResult.VulnerabilityCount.Total -gt 0) { exit 1 }
+    if ($finalResult.VulnerabilityCount.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { exit 1 }
 }
-Format-AuditResult $auditor.RunSolutionAudit($slnFile)
+
+
 #endregion
