@@ -1,5 +1,9 @@
-#Requires -Version 5.1
+<# 
+.SYNOPSIS
+    Performs vulnerability scan of NuGet packages in .NET solutions.
+#>
 
+#Requires -Version 5.1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)][string]$SolutionPath,
@@ -83,6 +87,17 @@ $CustomDefinitions = {
             $this.Severity = $serialized.Severity
             $this.AdvisoryUrl = $serialized.AdvisoryUrl
             $this.VersionRange = $serialized.VersionRange
+        }
+    }
+
+    class SolutionAuditPlural {
+        [SolutionAudit[]]$Solutions
+        [VulnerabilityCount]$VulnerabilityCount
+
+        SolutionAuditPlural([SolutionAudit[]]$solutions) {
+            $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
+            $this.Solutions = $solutions
+            $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
         }
     }
     
@@ -354,9 +369,14 @@ $CustomDefinitions = {
 . $CustomDefinitions
 
 #region MainBlockFunctions
-function Format-AuditResult($AuditResult, [Parameter(Mandatory = $false)][int]$Depth) {
+function Format-AuditResult($AuditResult) {
     if ($Depth -eq 0) {
         $Depth = 6
+    }
+
+    if ($AuditResult -is [System.Collections.ICollection]) {
+        $AuditResult = [SolutionAuditPlural]::new($AuditResult)
+        $Depth = 8
     }
 
     if ($OutputTo -eq 'json') {
@@ -409,7 +429,7 @@ function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions) {
         }
     }   
 
-    return Format-AuditResult $results -Depth 7
+    return Format-AuditResult $results
 }
 #endregion
 
