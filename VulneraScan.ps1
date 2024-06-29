@@ -327,13 +327,14 @@ $CustomDefinitions = {
 
         [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatched) {
             $projectAssetsJson = Get-ProjectAssetsJson $projectCsproj
-            $projectAssetsParsed = Get-Content -Path $projectAssetsJson | ConvertFrom-Json -AsHashtable
+            $projectAssetsParsed = Get-Content -Path $projectAssetsJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 
-            $packages = $projectAssetsParsed.libraries.Values `
-            | Where-Object { $_.type -eq 'package' } `
-            | Select-Object -ExpandProperty path `
+            $packages = $projectAssetsParsed.libraries `
+            | Get-Member -MemberType NoteProperty `
+            | Select-Object -ExpandProperty Name `
+            | Where-Object { $projectAssetsParsed.libraries.$_.type -eq 'package' } `
             | ForEach-Object {
-                ($name, $version) = $_.Split('/')
+                ($name, $version) = $projectAssetsParsed.libraries.$_.path.Split('/')
                 @{Name = $name; Version = $version } 
             }
 
