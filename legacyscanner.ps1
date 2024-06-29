@@ -31,6 +31,12 @@ $CustomDefinitions = {
         return [bool](Get-Member -InputObject $object -Name $propertyName -MemberType Properties)
     }
 
+    function Convert-NormalizedVersionString([string]$versionString) {
+        @("(", ")", "[", "]") | ForEach-Object { $versionString = $versionString.Replace($_, '') }
+        ($versionString, $_) = $versionString.Split('-')
+        return $versionString
+    }
+
     function ConvertTo-StandardObject($InputObject) {          
         if ($InputObject -is [System.Collections.ICollection]) {
             $newArray = $InputObject | ForEach-Object {
@@ -228,7 +234,8 @@ $CustomDefinitions = {
             $packagesConfig = Get-PackagesConfig $projectCsproj
             $packages = [xml](Get-Content $packagesConfig.FullName) | Select-Xml -XPath './/package' | Select-Object -ExpandProperty Node
             $audits = $packages | ForEach-Object {
-                $audit = $this.RunPackageAudit($_.id, $_.version)
+                $version = Convert-NormalizedVersionString $_.version
+                $audit = $this.RunPackageAudit($_.id, $version)
                 if ($audit.VulnerabilityCount.Total -gt 0) {
                     $audit
                 }
@@ -257,15 +264,23 @@ $CustomDefinitions = {
         }
     
         hidden static [string[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
-            $content = Get-Content -Path $solutionFile.FullName -Raw
-            $allMatches = ([regex]'Project.*= (?<project>".*").*"{.*}"\sEndProject').Matches($content)
-            $solutionParentDir = $solutionFile.Directory.Parent.FullName
-            $paths = $allMatches | ForEach-Object {
-                ([string]$name, [string]$path) = ($_.Groups['project'].Value).Split(',')
+            $content = Get-Content -Path $solutionFile.FullName
+            $solutionDir = $solutionFile.Directory.FullName
+
+            $projects = $content | Where-Object { [VulnerabilityAuditor]::IsProjectLine($_) } | ForEach-Object {
+                ($name, $path) = $_.Split(',')
+                ($path, $guid) = $path.Split('{')
                 $path = $path.Replace('"', '').Trim()
-                Join-Path -Path $solutionParentDir -ChildPath $path
+                Join-Path -Path $solutionDir -ChildPath $path
             }
-            return $paths
+            return $projects | Sort-Object
+        }
+
+        hidden static [bool]IsProjectLine([string]$line) {
+            $ProjectLineBegin = 'project("'
+            $CsprojExtension = '.csproj'
+            $line = $line.ToLowerInvariant()
+            return $line.Contains($ProjectLineBegin) -and $line.Contains($CsprojExtension)
         }
     }
     #endregion
@@ -301,24 +316,18 @@ $CustomDefinitions = {
             $vrange.IsMaxInclusive = $max.EndsWith(']')
             
             # set Min version
-            $minVersionString = [VersionRange]::NormalizeVersionString($min)
+            $minVersionString = Convert-NormalizedVersionString $min
             if (![string]::IsNullOrEmpty($minVersionString)) {
                 $vrange.Min = [version]$minVersionString
             }
     
             # set Max version
-            $maxVersionString = [VersionRange]::NormalizeVersionString($max)
+            $maxVersionString = Convert-NormalizedVersionString $max
             if (![string]::IsNullOrEmpty($maxVersionString)) {
                 $vrange.Max = [version]$maxVersionString 
             }
     
             return $vrange     
-        }
-    
-        hidden static [string]NormalizeVersionString([string]$versionString) {
-            @("(", ")", "[", "]") | ForEach-Object { $versionString = $versionString.Replace($_, '') }
-            ($versionString, $_) = $versionString.Split('-')
-            return $versionString
         }
     
         [bool]CheckInRange([version]$version) {
