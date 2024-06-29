@@ -380,33 +380,35 @@ function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions) {
         return Format-AuditResult $result
     }  
 
-    $scriptBlock = {
-        param([psobject]$auditorObject)
-        
-        $path = $input | Select-Object -ExpandProperty FullName
-
-        $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
-        . $customDefinitions
-
-        [VulnerabilityAuditor]$a = $auditorObject
-        $audit = $a.RunSolutionAudit($path)
-
-        ConvertTo-StandardObject $audit
-    }
-
     try {
-        Get-Command -Name Start-ThreadJob -ErrorAction Stop
+        Get-Command -Name Start-ThreadJob -ErrorAction Stop | Out-Null
+
+        $scriptBlock = {
+            param([psobject]$auditorObject)
+            
+            $path = $input | Select-Object -ExpandProperty FullName
+    
+            $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
+            . $customDefinitions
+    
+            [VulnerabilityAuditor]$a = $auditorObject
+            $audit = $a.RunSolutionAudit($path)
+    
+            ConvertTo-StandardObject $audit
+        }
+
         $jobResults = $Solutions | ForEach-Object {
             $_ | Start-ThreadJob -ScriptBlock $scriptBlock -ArgumentList (ConvertTo-StandardObject $auditor)
         } | Receive-Job -Wait -AutoRemoveJob
+        $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
     }
     catch {
-        $jobResults = $Solutions | ForEach-Object {
-            $_ | Start-Job -ScriptBlock $scriptBlock -ArgumentList (ConvertTo-StandardObject $auditor)
-        } | Receive-Job -Wait -AutoRemoveJob
+        # if Start-ThreadJob not found then fallback to sequential execution - Start-Job is to heavy
+        $results = $Solutions | ForEach-Object {
+            $auditor.RunSolutionAudit($_)
+        }
     }   
 
-    $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
     return Format-AuditResult $results -Depth 7
 }
 #endregion
