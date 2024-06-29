@@ -23,6 +23,16 @@ $CustomDefinitions = {
     function Get-PackagesConfig([System.IO.FileInfo]$projectCsproj) {
         Get-ChildItem -Path $projectCsproj.Directory -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
     }
+
+    function Get-ProjectAssetsJson([System.IO.FileInfo]$projectCsproj) {
+        $path = Join-Path -Path $projectCsproj.Directory.FullName -ChildPath 'obj\project.assets.json'
+        try {
+            Get-ChildItem -Path $path -ErrorAction Stop -Force
+        }
+        catch {
+            throw "project.assets.json for project: '$projectCsproj' not found! Run 'nuget restore' or 'dotnet restore' on the project's solution before running this command."
+        }
+    }
     
     function Test-LegacyNugetProject([System.IO.FileInfo]$projectCsproj) {
         $packageReferences = [xml](Get-Content -Path $projectCsproj.FullName) `
@@ -32,6 +42,15 @@ $CustomDefinitions = {
         $packagesConfig = Get-PackagesConfig $projectCsproj
     
         return $packageReferences.Count -eq 0 -and $packagesConfig
+    }
+
+    function Test-ModernNugetProject([System.IO.FileInfo]$projectCsproj) {
+        $project = [xml](Get-Content -Path $projectCsproj.FullName) `
+        | Select-Xml -XPath './Project' -ErrorAction SilentlyContinue `
+        | Select-Object -ExpandProperty Node
+    
+        $sdkAttribute = $project.Attributes.GetNamedItem('Sdk')
+        return ([bool]$sdkAttribute)
     }
     
     function Test-HasProperty([System.Object]$object, [string]$propertyName) {
@@ -116,20 +135,23 @@ $CustomDefinitions = {
     class SolutionAudit {
         [string]$SolutionName
         [VulnerabilityCount]$VulnerabilityCount
+        [ProjectAudit[]]$Projects
         [ProjectAudit[]]$LegacyProjects
         [string]$FullPath
     
-        SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$audits) {
+        SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
             $this.FullPath = $solutionFile.FullName
             $this.SolutionName = $solutionFile.Name
-            $this.LegacyProjects = $audits
-            $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
+            $this.LegacyProjects = $legacyAudits
+            $this.Projects = $audits
+            $counts = $($this.LegacyProjects; $this.Projects) | Select-Object -ExpandProperty VulnerabilityCount
             $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
         }
 
         SolutionAudit([psobject]$serialized) {
             $this.FullPath = $serialized.FullPath
             $this.SolutionName = $serialized.SolutionName
+            $this.Projects = $serialized.Projects
             $this.LegacyProjects = $serialized.LegacyProjects
             $this.VulnerabilityCount = $serialized.VulnerabilityCount
         }
@@ -277,18 +299,47 @@ $CustomDefinitions = {
 
         [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatched) {
             $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
-            $projectAudits = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } | ForEach-Object {
+            $legacyAudits = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } | ForEach-Object {
+                $this.RunLegacyProjectAudit($_, $findPatched)
+            }
+            $audits = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } | ForEach-Object {
                 $this.RunProjectAudit($_, $findPatched)
             }
-            return [SolutionAudit]::new($solutionFile, $projectAudits)
+
+            return [SolutionAudit]::new($solutionFile, $legacyAudits, $audits)
         }
     
-        [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatched) {
+        [ProjectAudit]RunLegacyProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatched) {
             $packagesConfig = Get-PackagesConfig $projectCsproj
-            $packages = [xml](Get-Content $packagesConfig.FullName) | Select-Xml -XPath './/package' | Select-Object -ExpandProperty Node
+            $packages = [xml](Get-Content $packagesConfig.FullName) `
+            | Select-Xml -XPath './/package' `
+            | Select-Object -ExpandProperty Node
+
             $audits = $packages | ForEach-Object {
                 $version = Convert-NormalizedVersionString $_.version
                 $audit = $this.RunPackageAudit($_.id, $version, $findPatched)
+                if ($audit.VulnerabilityCount.Total -gt 0) {
+                    $audit
+                }
+            }
+            return [ProjectAudit]::new($projectCsproj, $audits)
+        }
+
+        [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatched) {
+            $projectAssetsJson = Get-ProjectAssetsJson $projectCsproj
+            $projectAssetsParsed = Get-Content -Path $projectAssetsJson | ConvertFrom-Json -AsHashtable
+
+            $packages = $projectAssetsParsed.libraries.Values `
+            | Where-Object { $_.type -eq 'package' } `
+            | Select-Object -ExpandProperty path `
+            | ForEach-Object {
+                ($name, $version) = $_.Split('/')
+                @{Name = $name; Version = $version } 
+            }
+
+            $audits = $packages | ForEach-Object {
+                $version = Convert-NormalizedVersionString $_.Version
+                $audit = $this.RunPackageAudit($_.Name, $version, $findPatched)
                 if ($audit.VulnerabilityCount.Total -gt 0) {
                     $audit
                 }
@@ -527,9 +578,10 @@ else {
 Format-AuditResult $finalResult
 
 if ($BuildBreaker) {
-    if ($null -eq $MinimumBreakLevel -and $finalResult.VulnerabilityCount.Total -gt 0) { exit 1 }
+    if ($null -eq $MinimumBreakLevel) {
+        if ($finalResult.VulnerabilityCount.Total -gt 0) { exit 1 }
+        exit 0
+    }
     if ($finalResult.VulnerabilityCount.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { exit 1 }
 }
-
-
 #endregion
