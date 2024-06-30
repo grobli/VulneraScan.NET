@@ -4,6 +4,8 @@
 #>
 
 #Requires -Version 5.1
+
+#region Parameters
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)][string]$SolutionPath,
@@ -17,16 +19,21 @@ param (
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
     [Parameter()][switch]$Restore
 )
+#endregion
 <# 
     define all custom functions and classes inside wrapper ScriptBlock 
     in order to use them in parallel execution with "Start-Job" 
 #>
+
 $CustomDefinitions = {
     #region CommonFunctions
+    #region Get-PackagesConfig
     function Get-PackagesConfig([System.IO.FileInfo]$projectCsproj) {
         Get-ChildItem -Path $projectCsproj.Directory -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
     }
+    #endregion
 
+    #region Get-ProjectAssetsJson
     function Get-ProjectAssetsJson([System.IO.FileInfo]$projectCsproj) {
         $path = Join-Path -Path $projectCsproj.Directory.FullName -ChildPath 'obj\project.assets.json'
         try {
@@ -40,7 +47,9 @@ $CustomDefinitions = {
             throw "project.assets.json for project: '$projectCsproj' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
         }
     }
+    #endregion
     
+    #region Test-LegacyNugetProject
     function Test-LegacyNugetProject([System.IO.FileInfo]$projectCsproj) {
         $packageReferences = [xml](Get-Content -Path $projectCsproj.FullName) `
         | Select-Xml -XPath './/PackageReference' -ErrorAction SilentlyContinue `
@@ -50,7 +59,9 @@ $CustomDefinitions = {
     
         return $packageReferences.Count -eq 0 -and $packagesConfig
     }
+    #endregion
 
+    #region Test-ModernNugetProject
     function Test-ModernNugetProject([System.IO.FileInfo]$projectCsproj) {
         $project = [xml](Get-Content -Path $projectCsproj.FullName) `
         | Select-Xml -XPath './Project' -ErrorAction SilentlyContinue `
@@ -61,17 +72,17 @@ $CustomDefinitions = {
         $sdkAttribute = $project.Attributes.GetNamedItem('Sdk')
         return $null -ne $sdkAttribute
     }
-    
-    function Test-HasProperty([System.Object]$object, [string]$propertyName) {
-        return [bool](Get-Member -InputObject $object -Name $propertyName -MemberType Properties)
-    }
+    #endregion
 
+    #region Convert-NormalizedVersionString
     function Convert-NormalizedVersionString([string]$versionString) {
         @("(", ")", "[", "]") | ForEach-Object { $versionString = $versionString.Replace($_, '') }
         ($versionString, $_) = $versionString.Split('-')
         return $versionString
     }
+    #endregion
 
+    #region Convert-NormalizedVersionString
     function ConvertTo-StandardObject($InputObject) {          
         if ($InputObject -is [System.Collections.ICollection]) {
             $newArray = $InputObject | ForEach-Object {
@@ -93,7 +104,9 @@ $CustomDefinitions = {
         }
         return $standardObject
     }
+    #endregion
 
+    #region Invoke-SolutionVulnerabilityScan
     function Invoke-SolutionVulnerabilityScan([VulnerabilityAuditor]$Auditor, [System.IO.FileInfo]$SolutionFilePath, 
         [string]$ProjectsToBeScanned, [bool]$FindPatchedVersionOnline) {
         if ([string]::IsNullOrEmpty($ProjectsToBeScanned) -or $ProjectsToBeScanned -eq 'All') {
@@ -106,7 +119,9 @@ $CustomDefinitions = {
 
         return $Auditor.RunModernSolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
     }
+    #endregion
     
+    #region Invoke-DotnetRestore
     function Invoke-DotnetRestore([System.IO.FileInfo]$ProjectCsproj) {
         try {
             dotnet.exe restore $ProjectCsproj.FullName | Write-Debug
@@ -115,6 +130,7 @@ $CustomDefinitions = {
             nuget.exe restore $ProjectCsproj.FullName | Write-Debug
         }
     }
+    #endregion
     #endregion
     
     #region DataClasses
@@ -662,7 +678,9 @@ $CustomDefinitions = {
 . $CustomDefinitions
 
 #region MainBlockFunctions
+#region Format-AuditResult
 function Format-AuditResult($AuditResult) {
+  
     if ($Depth -eq 0) {
         $Depth = 6
     }
@@ -696,7 +714,9 @@ function Format-AuditResult($AuditResult) {
     
     $AuditResult
 }
+#endregion
 
+#region Format-SolutionAuditAsText
 function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit | Select-Object -ExcludeProperty Projects, LegacyProjects, VulnerabilityCount | Format-Table
     Write-Output 'Vulnerability Count:'
@@ -709,7 +729,9 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
         }
     } 
 }
+#endregion
 
+#region Invoke-PluralScan
 function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
     if ($Solutions.Count -eq 1) {
         $auditor = [VulnerabilityAuditor]::new()
@@ -766,6 +788,9 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
     return $results
 }
 #endregion
+#endregion
+
+
 
 #region MAIN
 if (!(Test-Path -Path $SolutionPath)) {
