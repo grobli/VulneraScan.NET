@@ -12,7 +12,8 @@ param (
     [Parameter()][switch]$BuildBreaker,
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
     [Parameter()][switch]$FindPatchedOnline,
-    [Parameter()][switch]$Parallel
+    [Parameter()][switch]$Parallel,
+    [Parameter()][switch]$DontBreakOnLegacy
 )
 
 <# 
@@ -128,12 +129,12 @@ $CustomDefinitions = {
     #region SolutionAuditPlural
     class SolutionAuditPlural {
         [SolutionAudit[]]$Solutions
-        [VulnerabilityCount]$VulnerabilityCount
+        [SolutionAuditVulnerabilityCount]$VulnerabilityCount
 
         SolutionAuditPlural([SolutionAudit[]]$solutions) {
             $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
             $this.Solutions = $solutions
-            $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
+            $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
         }
     }
     #endregion
@@ -141,7 +142,7 @@ $CustomDefinitions = {
     #region SolutionAudit
     class SolutionAudit {
         [string]$SolutionName
-        [VulnerabilityCount]$VulnerabilityCount
+        [SolutionAuditVulnerabilityCount]$VulnerabilityCount
         [ProjectAudit[]]$Projects
         [ProjectAudit[]]$LegacyProjects
         [string]$FullPath
@@ -151,8 +152,7 @@ $CustomDefinitions = {
             $this.SolutionName = $solutionFile.Name
             $this.LegacyProjects = $legacyAudits
             $this.Projects = $audits
-            $counts = $($this.LegacyProjects; $this.Projects) | Select-Object -ExpandProperty VulnerabilityCount
-            $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
+            $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
         }
 
         SolutionAudit([psobject]$serialized) {
@@ -246,7 +246,7 @@ $CustomDefinitions = {
         [int]$High
         [int]$Critical
 
-        VulnerabilityCount() {}
+        hidden VulnerabilityCount() {}
 
         VulnerabilityCount([psobject]$serialized) {
             $this.Total = $serialized.Total
@@ -292,6 +292,50 @@ $CustomDefinitions = {
             $highVal = $this.High
             $criticalVal = $this.Critical
             return "$totalVal (L:$lowVal M:$moderateVal H:$highVal C:$criticalVal)"
+        }
+    }
+    #endregion
+
+    #region SolutionAuditVulnerabilityCount
+    class SolutionAuditVulnerabilityCount {
+        [VulnerabilityCount]$All
+        [VulnerabilityCount]$Modern
+        [VulnerabilityCount]$Legacy
+
+        hidden SolutionAuditVulnerabilityCount() {}
+
+        SolutionAuditVulnerabilityCount([ProjectAudit[]]$legacyProjectAudits, [ProjectAudit[]]$modernProjectAudits) {
+            $modernCounts = $modernProjectAudits | Select-Object -ExpandProperty VulnerabilityCount
+            $legacyCounts = $legacyProjectAudits | Select-Object -ExpandProperty VulnerabilityCount
+            $this.Modern = [VulnerabilityCount]::SumCounts($modernCounts)
+            $this.Legacy = [VulnerabilityCount]::SumCounts($legacyCounts)
+            $allCounts = $($this.Modern; $this.Legacy)
+            $this.All = [VulnerabilityCount]::SumCounts($allCounts)
+        }
+
+        SolutionAuditVulnerabilityCount([psobject]$serialized) {
+            $this.Modern = $serialized.Modern
+            $this.Legacy = $serialized.Legacy
+            $this.All = $serialized.All
+        }
+
+        static[SolutionAuditVulnerabilityCount]SumCounts([SolutionAuditVulnerabilityCount[]]$counts) {
+            $count = [SolutionAuditVulnerabilityCount]::new()
+            $allCounts = $counts | Select-Object -ExpandProperty All
+            $legacyCounts = $counts | Select-Object -ExpandProperty Legacy
+            $modernCounts = $counts | Select-Object -ExpandProperty Modern
+
+            $count.All = [VulnerabilityCount]::SumCounts($allCounts)
+            $count.Legacy = [VulnerabilityCount]::SumCounts($legacyCounts)
+            $count.Modern = [VulnerabilityCount]::SumCounts($modernCounts)
+            return $count
+        }
+
+        [string]ToString() {
+            $allVal = $this.All
+            $legacyVal = $this.Legacy
+            $modernVal = $this.Modern
+            return "$allVal (Legacy: $legacyVal | Modern: $modernVal)"
         }
     }
     #endregion
@@ -689,6 +733,8 @@ Format-AuditResult $finalResult
 
 if ($BuildBreaker) {
     if ($null -eq $MinimumBreakLevel) {
+
+
         if ($finalResult.VulnerabilityCount.Total -gt 0) { exit 1 }
         exit 0
     }
