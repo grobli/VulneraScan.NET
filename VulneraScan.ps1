@@ -478,6 +478,14 @@ $CustomDefinitions = {
 
         hidden static [PSCustomObject]GetModernAndLegacyCsprojs([System.IO.FileInfo]$solutionFile) {
             $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
+
+            if (!$projectCsprojs) {
+                return [PSCustomObject]@{
+                    Legacy = @()
+                    Modern = @()
+                }
+            }
+
             $legacy = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } 
             $modern = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } 
             return [PSCustomObject]@{
@@ -600,9 +608,9 @@ $CustomDefinitions = {
                 ($name, $path) = $_.Split(',')
                 ($path, $guid) = $path.Split('{')
                 $path = $path.Replace('"', '').Trim()
-                Join-Path -Path $solutionDir -ChildPath $path
+                [System.IO.FileInfo](Join-Path -Path $solutionDir -ChildPath $path)
             }
-            return $projects | Sort-Object
+            return $projects | Where-Object { Test-Path -Path $_.FullName } | Sort-Object
         }
 
         hidden static [bool]IsProjectLine([string]$line) {
