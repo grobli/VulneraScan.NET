@@ -37,7 +37,7 @@ $CustomDefinitions = {
                 Invoke-DotnetRestore $projectCsproj
                 return Get-ChildItem -Path $path -ErrorAction Stop -Force
             }
-            throw "project.assets.json for project: '$projectCsproj' not found! Run 'nuget restore' or 'dotnet restore' on the project's solution before running this command."
+            throw "project.assets.json for project: '$projectCsproj' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
         }
     }
     
