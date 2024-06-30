@@ -49,6 +49,8 @@ $CustomDefinitions = {
         $project = [xml](Get-Content -Path $projectCsproj.FullName) `
         | Select-Xml -XPath './Project' -ErrorAction SilentlyContinue `
         | Select-Object -ExpandProperty Node
+
+        if ($null -eq $project) { return $false }
     
         $sdkAttribute = $project.Attributes.GetNamedItem('Sdk')
         return $null -ne $sdkAttribute
@@ -278,24 +280,45 @@ $CustomDefinitions = {
     #region VulnerabilityAuditor
     class VulnerabilityAuditor {
         hidden [string]$NugetVulnerabilityIndexUrl
-        hidden [System.Object]$Base
-        hidden [System.Object]$Update
+        hidden [hashtable]$Base
+        hidden [hashtable]$Update
         hidden [hashtable]$AdvisoriesCache
+        hidden [hashtable]$VulnerabilityCache
 
         VulnerabilityAuditor() {
             $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
             $this.AdvisoriesCache = @{}
+            $this.VulnerabilityCache = @{}
 
             $index = Invoke-RestMethod $this.NugetVulnerabilityIndexUrl
 
-            $this.Base = Invoke-RestMethod ($index | Where-Object -Property '@name' -eq base).'@id'
-            $this.Update = Invoke-RestMethod ($index | Where-Object -Property '@name' -eq update).'@id'
+            $this.Base = [VulnerabilityAuditor]::FetchNuGetData($index, 'base')
+            $this.Update = [VulnerabilityAuditor]::FetchNuGetData($index, 'update')
         }
 
         VulnerabilityAuditor([psobject]$serialized) {
             $this.NugetVulnerabilityIndexUrl = $serialized.NugetVulnerabilityIndexUrl
             $this.Base = $serialized.Base
             $this.Update = $serialized.Update
+            $this.AdvisoriesCache = @{}
+            $this.VulnerabilityCache = @{}
+        }
+
+        hidden static [hashtable]FetchNuGetData($index, [string]$nugetStoreId) {
+            $response = Invoke-WebRequest ($index | Where-Object -Property '@name' -eq $nugetStoreId).'@id'
+            try {
+                return $response.Content | ConvertFrom-Json -AsHashTable
+            }
+            catch {
+                $dict = @{}
+                $json = $response.Content | ConvertFrom-Json
+                $json | Get-Member -MemberType NoteProperty `
+                | Select-Object -ExpandProperty Name `
+                | ForEach-Object {
+                    $dict[$_] = $json.$_
+                }
+                return $dict
+            }
         }
 
         [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatched) {
@@ -327,15 +350,27 @@ $CustomDefinitions = {
 
         [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatched) {
             $projectAssetsJson = Get-ProjectAssetsJson $projectCsproj
-            $projectAssetsParsed = Get-Content -Path $projectAssetsJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+            $projectAssetsContent = Get-Content -Path $projectAssetsJson 
 
-            $packages = $projectAssetsParsed.libraries `
-            | Get-Member -MemberType NoteProperty `
-            | Select-Object -ExpandProperty Name `
-            | Where-Object { $projectAssetsParsed.libraries.$_.type -eq 'package' } `
-            | ForEach-Object {
-                ($name, $version) = $projectAssetsParsed.libraries.$_.path.Split('/')
-                @{Name = $name; Version = $version } 
+            try {
+                $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json -AsHashTable
+                $packages = $projectAssetsParsed.libraries.Values `
+                | Where-Object { $_.type -eq 'package' } `
+                | ForEach-Object {
+                    ($name, $version) = $_.path.Split('/')
+                    @{ Name = $name; Version = $version } 
+                }
+            }
+            catch {
+                $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json
+                $packages = $projectAssetsParsed.libraries `
+                | Get-Member -MemberType NoteProperty `
+                | Select-Object -ExpandProperty Name `
+                | Where-Object { $projectAssetsParsed.libraries.$_.type -eq 'package' } `
+                | ForEach-Object {
+                    ($name, $version) = $projectAssetsParsed.libraries.$_.path.Split('/')
+                    @{Name = $name; Version = $version } 
+                }
             }
 
             $audits = $packages | ForEach-Object {
@@ -349,8 +384,8 @@ $CustomDefinitions = {
         }
     
         [PackageAudit]RunPackageAudit([string]$packageName, [version]$packageVersion, [bool]$findPatched) {
-            $vBase = [VulnerabilityAuditor]::SearchInData($this.Base, $packageName, $packageVersion)
-            $vUpdate = [VulnerabilityAuditor]::SearchInData($this.Update, $packageName, $packageVersion)
+            $vBase = $this.SearchInData($this.Base, $packageName, $packageVersion)
+            $vUpdate = $this.SearchInData($this.Update, $packageName, $packageVersion)
             $allVulnerabilities = $($vBase; $vUpdate)
 
             if ($allVulnerabilities.Count -gt 0 -and $findPatched) {
@@ -379,18 +414,29 @@ $CustomDefinitions = {
             return ($patchedVersions | Sort-Object -Descending)[0]
         }
     
-        hidden static [Vulnerability[]]SearchInData([System.Object]$data, [string]$packageName, [version]$packageVersion) {
+        hidden [Vulnerability[]]SearchInData([hashtable]$data, [string]$packageName, [version]$packageVersion) {
+            if (!$data.ContainsKey($packageName)) {
+                return @()
+            }
+
+            $cacheKey = $packageName + $packageVersion.ToString()
+            if ($this.VulnerabilityCache.ContainsKey($cacheKey)) {
+                return $this.VulnerabilityCache[$cacheKey]
+            }
+
             $vulnerabilities = New-Object Collections.Generic.List[Vulnerability]
-            if (Test-HasProperty -object $data -propertyName $packageName) {
-                $data.$packageName | ForEach-Object {
-                    $vrange = [VersionRange]::Parse($_.versions)
-                    $vulnerability = [Vulnerability]::new($_.severity, $_.url, $vrange)
-                    if ($vulnerability.VersionRange.CheckInRange($packageVersion)) {
-                        $vulnerabilities.Add($vulnerability)
-                    }  
-                }    
-            } 
-            return $vulnerabilities.ToArray()
+
+            $data[$packageName] | ForEach-Object {
+                $vrange = [VersionRange]::Parse($_.versions)
+                $vulnerability = [Vulnerability]::new($_.severity, $_.url, $vrange)
+                if ($vulnerability.VersionRange.CheckInRange($packageVersion)) {
+                    $vulnerabilities.Add($vulnerability)
+                }  
+            }    
+
+            $vArray = $vulnerabilities.ToArray()
+            $this.VulnerabilityCache[$cacheKey] = $vArray
+            return $vArray
         }
     
         hidden static [string[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
@@ -411,6 +457,14 @@ $CustomDefinitions = {
             $CsprojExtension = '.csproj'
             $line = $line.ToLowerInvariant()
             return $line.Contains($ProjectLineBegin) -and $line.Contains($CsprojExtension)
+        }
+
+        [psobject]Serialize() {
+            return @{
+                Base                       = $this.Base
+                Update                     = $this.Update
+                NugetVulnerabilityIndexUrl = $this.NugetVulnerabilityIndexUrl
+            }
         }
     }
     #endregion
@@ -540,31 +594,34 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions, [Parameter(Mandator
     }  
 
     if ($Parallel) {
+        $auditor = [VulnerabilityAuditor]::new()
+        $auditorSerialized = $auditor.Serialize()
+        $scriptBlock = {                
+            $path = $input | Select-Object -ExpandProperty FullName
+    
+            $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
+            . $customDefinitions
+    
+            $auditor = [VulnerabilityAuditor]::new($using:auditorSerialized)
+            $audit = $auditor.RunSolutionAudit($path, $using:FindPatchedVersion)
+    
+            ConvertTo-StandardObject $audit
+        }
+
         try {
             Get-Command -Name Start-ThreadJob -ErrorAction Stop | Out-Null
-    
-            $scriptBlock = {                
-                $path = $input | Select-Object -ExpandProperty FullName
-        
-                $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
-                . $customDefinitions
-        
-                $auditor = [VulnerabilityAuditor]::new()
-                $audit = $auditor.RunSolutionAudit($path, $using:FindPatchedVersion)
-        
-                ConvertTo-StandardObject $audit
-            }
     
             $jobResults = $Solutions | ForEach-Object {
                 $_ | Start-ThreadJob -ScriptBlock $scriptBlock 
             } | Receive-Job -Wait -AutoRemoveJob
-
-            $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
         }
         catch {
-            # if Start-ThreadJob not found then fallback to sequential execution - Start-Job is to heavy
-            $auditor = [VulnerabilityAuditor]::new()
-            $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_, $FindPatchedVersion) }
+            $jobResults = $Solutions | ForEach-Object {
+                $_ | Start-Job -ScriptBlock $scriptBlock 
+            } | Receive-Job -Wait -AutoRemoveJob
+        }
+        finally {
+            $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
         }   
     }
     else {
@@ -596,7 +653,6 @@ elseif ($Recurse) {
     $finalResult = Invoke-PluralScan -Solutions $solutionPaths -FindPatchedVersion $FindPatched
 }
 else {
-    $auditor = [VulnerabilityAuditor]::new()
     $slnFile = Get-ChildItem -Path $SolutionPath -Filter *.sln -Force -ErrorAction SilentlyContinue
     if ($null -eq $slnFile) {
         throw "Provided directory does not contain solution file. Use command with: '-Recurse' switch to search for all solutions in directory tree"
@@ -605,6 +661,7 @@ else {
         $files = [string]::Join(', ', $slnFile)
         throw "Provided directory contains multiple solution files ($files). Specify solution file directly or use command with: '-Recurse' switch to search for all solutions in directory tree"
     }
+    $auditor = [VulnerabilityAuditor]::new()
     $finalResult = $auditor.RunSolutionAudit($slnFile, $FindPatched)
 }
 
