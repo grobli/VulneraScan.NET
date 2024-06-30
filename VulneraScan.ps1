@@ -80,7 +80,7 @@ $CustomDefinitions = {
             return $InputObject
         }
     
-        $standardObject = [psobject]::new()
+        $standardObject = [PSCustomObject]::new()
         Get-Member -InputObject $InputObject -MemberType Properties -Force `
         | Where-Object { $_.Name -ne 'pstypenames' } `
         | ForEach-Object {
@@ -127,7 +127,7 @@ $CustomDefinitions = {
             $this.VersionRange = $vrange
         }
 
-        Vulnerability([psobject]$serialized) {
+        Vulnerability([PSCustomObject]$serialized) {
             $this.Severity = $serialized.Severity
             $this.AdvisoryUrl = $serialized.AdvisoryUrl
             $this.GhsaId = $serialized.GhsaId
@@ -169,7 +169,7 @@ $CustomDefinitions = {
             $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
         }
 
-        SolutionAudit([psobject]$serialized) {
+        SolutionAudit([PSCustomObject]$serialized) {
             $this.FullPath = $serialized.FullPath
             $this.SolutionName = $serialized.SolutionName
             $this.Projects = $serialized.Projects
@@ -194,7 +194,7 @@ $CustomDefinitions = {
             $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
         }
 
-        ProjectAudit([psobject]$serialized) {
+        ProjectAudit([PSCustomObject]$serialized) {
             $this.FullPath = $serialized.FullPath
             $this.ProjectName = $serialized.ProjectName
             $this.VulnerablePackages = $serialized.VulnerablePackages
@@ -219,7 +219,7 @@ $CustomDefinitions = {
             $this.VulnerabilityCount = [VulnerabilityCount]::Create($this.Vulnerabilities)
         }
 
-        PackageAudit([psobject]$serialized) {
+        PackageAudit([PSCustomObject]$serialized) {
             $this.PackageName = $serialized.PackageName
             $this.PackageVersion = $serialized.PackageVersion
             $this.Vulnerabilities = $serialized.Vulnerabilities
@@ -242,7 +242,7 @@ $CustomDefinitions = {
 
             # check if there is any uncertain version that is higher than inferred max patched version from Version Ranges
             $this.Vulnerabilities | Where-Object { $_.VersionRange.IsMaxInclusive } | ForEach-Object {
-                if ($_ -gt $maxPatchedVersion) {
+                if ($_.VersionRange.Max -gt $maxPatchedVersion) {
                     return $null
                 }
             }
@@ -262,7 +262,7 @@ $CustomDefinitions = {
 
         hidden VulnerabilityCount() {}
 
-        VulnerabilityCount([psobject]$serialized) {
+        VulnerabilityCount([PSCustomObject]$serialized) {
             $this.Total = $serialized.Total
             $this.Low = $serialized.Low
             $this.Moderate = $serialized.Moderate
@@ -327,7 +327,7 @@ $CustomDefinitions = {
             $this.All = [VulnerabilityCount]::SumCounts($allCounts)
         }
 
-        SolutionAuditVulnerabilityCount([psobject]$serialized) {
+        SolutionAuditVulnerabilityCount([PSCustomObject]$serialized) {
             $this.Modern = $serialized.Modern
             $this.Legacy = $serialized.Legacy
             $this.All = $serialized.All
@@ -362,7 +362,6 @@ $CustomDefinitions = {
         hidden [hashtable]$Update
         hidden [hashtable]$AdvisoriesCache
         hidden [hashtable]$AuditCache
-        hidden [hashtable]$VulnerabilityCache
 
         VulnerabilityAuditor() {
             $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
@@ -375,7 +374,7 @@ $CustomDefinitions = {
             $this.Update = [VulnerabilityAuditor]::FetchNuGetData($index, 'update')
         }
 
-        VulnerabilityAuditor([psobject]$serialized) {
+        VulnerabilityAuditor([PSCustomObject]$serialized) {
             $this.NugetVulnerabilityIndexUrl = $serialized.NugetVulnerabilityIndexUrl
             $this.Base = $serialized.Base
             $this.Update = $serialized.Update
@@ -435,11 +434,11 @@ $CustomDefinitions = {
             return [SolutionAudit]::new($solutionFile, $legacyAudits, @())
         }
 
-        hidden static [psobject]GetModernAndLegacyCsprojs([System.IO.FileInfo]$solutionFile) {
+        hidden static [PSCustomObject]GetModernAndLegacyCsprojs([System.IO.FileInfo]$solutionFile) {
             $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
             $legacy = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } 
             $modern = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } 
-            return @{
+            return [PSCustomObject]@{
                 Legacy = $legacy
                 Modern = $modern
             }
@@ -471,7 +470,7 @@ $CustomDefinitions = {
                 | Where-Object { $_.type -eq 'package' } `
                 | ForEach-Object {
                     ($name, $version) = $_.path.Split('/')
-                    @{ Name = $name; Version = $version } 
+                    [PSCustomObject]@{ Name = $name; Version = $version } 
                 }
             }
             catch {
@@ -482,7 +481,7 @@ $CustomDefinitions = {
                 | Where-Object { $projectAssetsParsed.libraries.$_.type -eq 'package' } `
                 | ForEach-Object {
                     ($name, $version) = $projectAssetsParsed.libraries.$_.path.Split('/')
-                    @{Name = $name; Version = $version } 
+                    [PSCustomObject]@{Name = $name; Version = $version } 
                 }
             }
 
@@ -571,8 +570,8 @@ $CustomDefinitions = {
             return $line.Contains($ProjectLineBegin) -and $line.Contains($CsprojExtension)
         }
 
-        [psobject]Serialize() {
-            return @{
+        [PSCustomObject]Serialize() {
+            return [PSCustomObject]@{
                 Base                       = $this.Base
                 Update                     = $this.Update
                 NugetVulnerabilityIndexUrl = $this.NugetVulnerabilityIndexUrl
@@ -705,35 +704,43 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
     }  
 
     if ($Parallel) {
+        $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+        $i = 0
+        $batches = $Solutions | ForEach-Object {
+            [PSCustomObject]@{
+                Solution = $_.FullName
+                BatchId  = $i++ % $cpuCount
+            }
+        } | Group-Object -Property BatchId
+
         $auditor = [VulnerabilityAuditor]::new()
         $auditorSerialized = $auditor.Serialize()
-        $scriptBlock = {                
-            $path = $input | Select-Object -ExpandProperty FullName
-    
+        $scriptBlock = {
             $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
             . $customDefinitions
-    
+            $WarningPreference = $using:WarningPreference   
+
+            $paths = $input.Group | Select-Object -ExpandProperty Solution
             $auditor = [VulnerabilityAuditor]::new($using:auditorSerialized)
 
-            $audit = Invoke-SolutionVulnerabilityScan $auditor $path $using:ProjectsToScan $using:FindPatchedOnline
-
-            ConvertTo-StandardObject $audit
+            return $paths | ForEach-Object {
+                $audit = Invoke-SolutionVulnerabilityScan $auditor $_ $using:ProjectsToScan $using:FindPatchedOnline
+                ConvertTo-StandardObject $audit
+            }
         }
 
-        try {
-            Get-Command -Name Start-ThreadJob -ErrorAction Stop | Out-Null
-    
-            $jobResults = $Solutions | ForEach-Object {
+        try {    
+            $jobResults = $batches | ForEach-Object {
                 $_ | Start-ThreadJob -ScriptBlock $scriptBlock 
             } | Receive-Job -Wait -AutoRemoveJob
         }
         catch {
-            $jobResults = $Solutions | ForEach-Object {
+            $jobResults = $batches | ForEach-Object {
                 $_ | Start-Job -ScriptBlock $scriptBlock 
             } | Receive-Job -Wait -AutoRemoveJob
         }
         finally {
-            $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
+            $results = $jobResults | ForEach-Object { [SolutionAudit]::new($_) }
         }   
     }
     else {
