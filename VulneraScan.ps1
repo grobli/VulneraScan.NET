@@ -13,7 +13,7 @@ param (
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
     [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][switch]$Parallel,
-    [Parameter()][switch]$DontBreakOnLegacy
+    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan
 )
 
 <# 
@@ -87,6 +87,19 @@ $CustomDefinitions = {
             Add-Member -InputObject $standardObject -NotePropertyName $_.Name -NotePropertyValue $property
         }
         return $standardObject
+    }
+
+    function Invoke-SolutionVulnerabilityScan([VulnerabilityAuditor]$Auditor, [System.IO.FileInfo]$SolutionFilePath, 
+        [string]$ProjectsToBeScanned, [bool]$FindPatchedVersionOnline) {
+        if ([string]::IsNullOrEmpty($ProjectsToBeScanned) -or $ProjectsToBeScanned -eq 'All') {
+            return $Auditor.RunSolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
+        }
+
+        if ($ProjectsToBeScanned -eq 'Legacy') {
+            return $Auditor.RunLegacySolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
+        }
+
+        return $Auditor.RunModernSolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
     }
     #endregion
     
@@ -387,14 +400,48 @@ $CustomDefinitions = {
         }
 
         [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
-            $legacyAudits = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } | ForEach-Object {
+            $csprojs = [VulnerabilityAuditor]::GetModernAndLegacyCsprojs($solutionFile)
+            $legacyAudits = $csprojs.Legacy | ForEach-Object {
                 $this.RunLegacyProjectAudit($_, $findPatchedOnline)
             }
-            $audits = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } | ForEach-Object {
+            $audits = $csprojs.Modern | ForEach-Object {
                 $this.RunProjectAudit($_, $findPatchedOnline)
             }
             return [SolutionAudit]::new($solutionFile, $legacyAudits, $audits)
+        }
+
+        [SolutionAudit]RunModernSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
+            $csprojs = [VulnerabilityAuditor]::GetModernAndLegacyCsprojs($solutionFile)
+            $audits = $csprojs.Modern | ForEach-Object {
+                $this.RunProjectAudit($_, $findPatchedOnline)
+            }
+            $csprojs.Legacy | ForEach-Object {
+                $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
+                Write-Warning -Message "ProjectsToScan= $ProjectsToScan - Ignoring project: $name"
+            }
+            return [SolutionAudit]::new($solutionFile, @(), $audits)
+        }
+
+        [SolutionAudit]RunLegacySolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
+            $csprojs = [VulnerabilityAuditor]::GetModernAndLegacyCsprojs($solutionFile)
+            $legacyAudits = $csprojs.Legacy | ForEach-Object {
+                $this.RunLegacyProjectAudit($_, $findPatchedOnline)
+            }
+            $csprojs.Modern | ForEach-Object {
+                $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
+                Write-Warning -Message "ProjectsToScan= $ProjectsToScan - Ignoring project: $name"
+            }
+            return [SolutionAudit]::new($solutionFile, $legacyAudits, @())
+        }
+
+        hidden static [psobject]GetModernAndLegacyCsprojs([System.IO.FileInfo]$solutionFile) {
+            $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
+            $legacy = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } 
+            $modern = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } 
+            return @{
+                Legacy = $legacy
+                Modern = $modern
+            }
         }
     
         [ProjectAudit]RunLegacyProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatchedOnline) {
@@ -503,7 +550,7 @@ $CustomDefinitions = {
             return ($patchedVersions | Sort-Object -Descending)[0]
         }
     
-        hidden static [string[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
+        hidden static [System.IO.FileInfo[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
             $content = Get-Content -Path $solutionFile.FullName
             $solutionDir = $solutionFile.Directory.FullName
 
@@ -613,11 +660,11 @@ function Format-AuditResult($AuditResult) {
     }
 
     if ($Format -eq 'Json') {
-        return $AuditResult | ConvertTo-Json -Depth $Depth -Compress 
+        return $AuditResult | ConvertTo-Json -Depth $Depth -Compress -WarningAction SilentlyContinue
     }
     
     if ($Format -eq 'Xml') {
-        return $AuditResult | ConvertTo-Xml -Depth $Depth -As String
+        return $AuditResult | ConvertTo-Xml -Depth $Depth -As String -WarningAction SilentlyContinue
     }
 
     if ($Format -eq 'Text') {
@@ -650,11 +697,10 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     } 
 }
 
-function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions, [Parameter(Mandatory = $false)][bool]$FindPatchedVersion) {
+function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
     if ($Solutions.Count -eq 1) {
         $auditor = [VulnerabilityAuditor]::new()
-        $result = $auditor.RunSolutionAudit($Solutions[0], $FindPatchedVersion)
-        $result
+        return Invoke-SolutionVulnerabilityScan $auditor $Solutions[0] $ProjectsToScan $FindPatchedOnline
     }  
 
     if ($Parallel) {
@@ -667,8 +713,9 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions, [Parameter(Mandator
             . $customDefinitions
     
             $auditor = [VulnerabilityAuditor]::new($using:auditorSerialized)
-            $audit = $auditor.RunSolutionAudit($path, $using:FindPatchedVersion)
-    
+
+            $audit = Invoke-SolutionVulnerabilityScan $auditor $path $using:ProjectsToScan $using:FindPatchedOnline
+
             ConvertTo-StandardObject $audit
         }
 
@@ -690,7 +737,9 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions, [Parameter(Mandator
     }
     else {
         $auditor = [VulnerabilityAuditor]::new()
-        $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_, $FindPatchedVersion) }
+        $results = $Solutions | ForEach-Object { 
+            Invoke-SolutionVulnerabilityScan $auditor $_ $ProjectsToScan $FindPatchedOnline
+        }
     }
   
     return $results
@@ -710,11 +759,11 @@ if (Test-Path -Path $SolutionPath -PathType Leaf) {
         throw "Provided file is not solution file. Invalid file extension - expected: '.sln' but received: '$extension'"
     }
     $auditor = [VulnerabilityAuditor]::new()
-    $finalResult = $auditor.RunSolutionAudit($slnFile, $FindPatchedOnline)
+    $finalResult = Invoke-SolutionVulnerabilityScan $auditor $slnFile $ProjectsToScan $FindPatchedOnline
 }
 elseif ($Recurse) {
     $solutionPaths = @(Get-ChildItem -Path $SolutionPath -Filter *.sln -Recurse -Force -ErrorAction SilentlyContinue)
-    $finalResult = Invoke-PluralScan -Solutions $solutionPaths -FindPatchedVersion $FindPatchedOnline
+    $finalResult = Invoke-PluralScan -Solutions $solutionPaths
 }
 else {
     $slnFile = Get-ChildItem -Path $SolutionPath -Filter *.sln -Force -ErrorAction SilentlyContinue
@@ -726,7 +775,7 @@ else {
         throw "Provided directory contains multiple solution files ($files). Specify solution file directly or use command with: '-Recurse' switch to search for all solutions in directory tree"
     }
     $auditor = [VulnerabilityAuditor]::new()
-    $finalResult = $auditor.RunSolutionAudit($slnFile, $FindPatchedOnline)
+    $finalResult = Invoke-SolutionVulnerabilityScan $auditor $slnFile $ProjectsToScan $FindPatchedOnline
 }
 
 Format-AuditResult $finalResult
