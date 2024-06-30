@@ -11,6 +11,7 @@ param (
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
+    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType,
     [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][switch]$Parallel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan
@@ -780,16 +781,32 @@ else {
 
 Format-AuditResult $finalResult
 
+#region BuildBreaker
 if ($BuildBreaker) {
+    if ([string]::IsNullOrEmpty($BreakOnProjectType)) {
+        $BreakOnProjectType = 'All'
+    }
+
     if ($null -eq $MinimumBreakLevel) {
-        if ($DontBreakOnLegacy -and $finalResult.VulnerabilityCount.Modern.Total -gt 0) {
+        if ($BreakOnProjectType -eq 'All' -and $finalResult.VulnerabilityCount.All.Total -gt 0) {
             exit 1
         }
-        if ($finalResult.VulnerabilityCount.All.Total -gt 0) { exit 1 }
+
+        if ($BreakOnProjectType -eq 'Modern' -and $finalResult.VulnerabilityCount.Modern.Total -gt 0) {
+            exit 1
+        }
+
+        if ($BreakOnProjectType -eq 'Legacy' -and $finalResult.VulnerabilityCount.Legacy.Total -gt 0) {
+            exit 1
+        }
         exit 0
     }
 
-    if ($DontBreakOnLegacy -and $finalResult.VulnerabilityCount.Modern.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
+    if ($BreakOnProjectType -eq 'Modern' -and $finalResult.VulnerabilityCount.Modern.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
+        exit 1
+    }
+
+    if ($BreakOnProjectType -eq 'Legacy' -and $finalResult.VulnerabilityCount.Legacy.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
         exit 1
     }
 
@@ -797,4 +814,5 @@ if ($BuildBreaker) {
         exit 1 
     }
 }
+#endregion
 #endregion
