@@ -733,11 +733,19 @@ Format-AuditResult $finalResult
 
 if ($BuildBreaker) {
     if ($null -eq $MinimumBreakLevel) {
-
-
-        if ($finalResult.VulnerabilityCount.Total -gt 0) { exit 1 }
+        if ($DontBreakOnLegacy -and $finalResult.VulnerabilityCount.Modern.Total -gt 0) {
+            exit 1
+        }
+        if ($finalResult.VulnerabilityCount.All.Total -gt 0) { exit 1 }
         exit 0
     }
-    if ($finalResult.VulnerabilityCount.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { exit 1 }
+
+    if ($DontBreakOnLegacy -and $finalResult.VulnerabilityCount.Modern.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
+        exit 1
+    }
+
+    if ($finalResult.VulnerabilityCount.All.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { 
+        exit 1 
+    }
 }
 #endregion
