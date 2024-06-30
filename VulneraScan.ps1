@@ -14,9 +14,9 @@ param (
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType,
     [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][switch]$Parallel,
-    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan
+    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
+    [Parameter()][switch]$Restore
 )
-
 <# 
     define all custom functions and classes inside wrapper ScriptBlock 
     in order to use them in parallel execution with "Start-Job" 
@@ -33,6 +33,10 @@ $CustomDefinitions = {
             Get-ChildItem -Path $path -ErrorAction Stop -Force
         }
         catch {
+            if ($Restore) {
+                Invoke-DotnetRestore $projectCsproj
+                return Get-ChildItem -Path $path -ErrorAction Stop -Force
+            }
             throw "project.assets.json for project: '$projectCsproj' not found! Run 'nuget restore' or 'dotnet restore' on the project's solution before running this command."
         }
     }
@@ -101,6 +105,15 @@ $CustomDefinitions = {
         }
 
         return $Auditor.RunModernSolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
+    }
+    
+    function Invoke-DotnetRestore([System.IO.FileInfo]$ProjectCsproj) {
+        try {
+            dotnet.exe restore $ProjectCsproj.FullName | Write-Debug
+        }
+        catch {
+            nuget.exe restore $ProjectCsproj.FullName | Write-Debug
+        }
     }
     #endregion
     
