@@ -7,11 +7,12 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)][string]$SolutionPath,
-    [Parameter()][ValidateSet('json', 'xml')]$Format,
+    [Parameter()][ValidateSet('Json', 'Xml', 'Text')]$Format,
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
-    [Parameter()][switch]$FindPatched
+    [Parameter()][switch]$FindPatched,
+    [Parameter()][switch]$Parallel
 )
 
 <# 
@@ -50,7 +51,7 @@ $CustomDefinitions = {
         | Select-Object -ExpandProperty Node
     
         $sdkAttribute = $project.Attributes.GetNamedItem('Sdk')
-        return ([bool]$sdkAttribute)
+        return $null -ne $sdkAttribute
     }
     
     function Test-HasProperty([System.Object]$object, [string]$propertyName) {
@@ -305,7 +306,6 @@ $CustomDefinitions = {
             $audits = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } | ForEach-Object {
                 $this.RunProjectAudit($_, $findPatched)
             }
-
             return [SolutionAudit]::new($solutionFile, $legacyAudits, $audits)
         }
     
@@ -494,52 +494,84 @@ function Format-AuditResult($AuditResult) {
         $Depth = 8
     }
 
-    if ($Format -eq 'json') {
+    if ($Format -eq 'Json') {
         return $AuditResult | ConvertTo-Json -Depth $Depth -Compress 
     }
     
-    if ($Format -eq 'xml') {
+    if ($Format -eq 'Xml') {
         return $AuditResult | ConvertTo-Xml -Depth $Depth -As String
+    }
+
+    if ($Format -eq 'Text') {
+        if ($AuditResult -is [SolutionAuditPlural]) {
+            $AuditResult | Select-Object -ExpandProperty Solutions | ForEach-Object {
+                Format-SolutionAuditAsText -SolutionAudit $_
+                Write-Output =================================================================================================================================================
+            }
+            return
+        }
+        else {
+            Format-SolutionAuditAsText -SolutionAudit $AuditResult
+            return
+        }
     }
     
     $AuditResult
 }
 
-function Invoke-ScannerInParallel([System.IO.FileInfo[]]$Solutions, [Parameter(Mandatory = $false)][bool]$FindPatchedVersion) {
-    $auditor = [VulnerabilityAuditor]::new()
+function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
+    $SolutionAudit | Select-Object -ExcludeProperty Projects, LegacyProjects, VulnerabilityCount | Format-Table
+    Write-Output 'Vulnerability Count:'
+    $SolutionAudit.VulnerabilityCount | Format-Table
+    $SolutionAudit.LegacyProjects | ForEach-Object {
+        $_ | Select-Object -ExcludeProperty VulnerablePackages | Format-Table
+        $_.VulnerablePackages | ForEach-Object {
+            $_ | Select-Object -ExcludeProperty Vulnerabilities | Format-Table 
+            $_.Vulnerabilities | Format-List 
+        }
+    } 
+}
 
+function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions, [Parameter(Mandatory = $false)][bool]$FindPatchedVersion) {
     if ($Solutions.Count -eq 1) {
+        $auditor = [VulnerabilityAuditor]::new()
         $result = $auditor.RunSolutionAudit($Solutions[0], $FindPatchedVersion)
         $result
     }  
 
-    try {
-        Get-Command -Name Start-ThreadJob -ErrorAction Stop | Out-Null
+    if ($Parallel) {
+        try {
+            Get-Command -Name Start-ThreadJob -ErrorAction Stop | Out-Null
+    
+            $scriptBlock = {                
+                $path = $input | Select-Object -ExpandProperty FullName
+        
+                $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
+                . $customDefinitions
+        
+                $auditor = [VulnerabilityAuditor]::new()
+                $audit = $auditor.RunSolutionAudit($path, $using:FindPatchedVersion)
+        
+                ConvertTo-StandardObject $audit
+            }
+    
+            $jobResults = $Solutions | ForEach-Object {
+                $_ | Start-ThreadJob -ScriptBlock $scriptBlock 
+            } | Receive-Job -Wait -AutoRemoveJob
 
-        $scriptBlock = {
-            param([psobject]$auditorObject)
-            
-            $path = $input | Select-Object -ExpandProperty FullName
-    
-            $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
-            . $customDefinitions
-    
-            [VulnerabilityAuditor]$a = $auditorObject
-            $audit = $a.RunSolutionAudit($path, $using:FindPatchedVersion)
-    
-            ConvertTo-StandardObject $audit
+            $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
         }
-
-        $jobResults = $Solutions | ForEach-Object {
-            $_ | Start-ThreadJob -ScriptBlock $scriptBlock -ArgumentList (ConvertTo-StandardObject $auditor)
-        } | Receive-Job -Wait -AutoRemoveJob
-        $results = $jobResults | ForEach-Object { [SolutionAudit]$_ }
+        catch {
+            # if Start-ThreadJob not found then fallback to sequential execution - Start-Job is to heavy
+            $auditor = [VulnerabilityAuditor]::new()
+            $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_, $FindPatchedVersion) }
+        }   
     }
-    catch {
-        # if Start-ThreadJob not found then fallback to sequential execution - Start-Job is to heavy
+    else {
+        $auditor = [VulnerabilityAuditor]::new()
         $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_, $FindPatchedVersion) }
-    }   
-
+    }
+  
     return $results
 }
 #endregion
@@ -561,7 +593,7 @@ if (Test-Path -Path $SolutionPath -PathType Leaf) {
 }
 elseif ($Recurse) {
     $solutionPaths = @(Get-ChildItem -Path $SolutionPath -Filter *.sln -Recurse -Force -ErrorAction SilentlyContinue)
-    $finalResult = Invoke-ScannerInParallel -Solutions $solutionPaths -FindPatchedVersion $FindPatched
+    $finalResult = Invoke-PluralScan -Solutions $solutionPaths -FindPatchedVersion $FindPatched
 }
 else {
     $auditor = [VulnerabilityAuditor]::new()
