@@ -157,9 +157,9 @@ $CustomDefinitions = {
     #region Vulnerability
     class Vulnerability {
         [string]$AdvisoryUrl
-        [string]$GhsaId
         [Severity]$Severity
         [VersionRange]$VersionRange
+        [string]$GhsaId
     
         Vulnerability([int]$severity, [string]$url, [VersionRange]$vrange) {
             $this.Severity = $severity
