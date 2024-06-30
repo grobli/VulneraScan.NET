@@ -17,13 +17,22 @@ param (
     [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][switch]$Parallel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
-    [Parameter()][switch]$Restore
+    [Parameter()][switch]$Restore,
+    [Parameter()][ValidateSet('OnDemand', 'Always')]$RestorePreference
 )
 #endregion
 <# 
     define all custom functions and classes inside wrapper ScriptBlock 
     in order to use them in parallel execution with "Start-Job" 
 #>
+
+#region SetDefaults
+if ([string]::IsNullOrEmpty($MinimumBreakLevel)) { $MinimumBreakLevel = 'Low' }
+if ([string]::IsNullOrEmpty($BreakOnProjectType)) { $BreakOnProjectType = 'All' }
+if ([string]::IsNullOrEmpty($ProjectsToScan)) { $ProjectsToScan = 'All' }
+if ([string]::IsNullOrEmpty($RestorePreference)) { $RestorePreference = 'OnDemand' }
+#endregion
+
 
 $CustomDefinitions = {
     #region CommonFunctions
@@ -35,6 +44,10 @@ $CustomDefinitions = {
 
     #region Get-ProjectAssetsJson
     function Get-ProjectAssetsJson([System.IO.FileInfo]$projectCsproj) {
+        if ($Restore -and $RestorePreference -eq 'Always') {
+            Invoke-DotnetRestore $projectCsproj
+        }
+
         $path = Join-Path -Path $projectCsproj.Directory.FullName -ChildPath 'obj\project.assets.json'
         try {
             Get-ChildItem -Path $path -ErrorAction Stop -Force
@@ -446,7 +459,7 @@ $CustomDefinitions = {
             }
             $csprojs.Legacy | ForEach-Object {
                 $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
-                Write-Warning -Message "ProjectsToScan= $ProjectsToScan - Ignoring project: $name"
+                Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring project: $name"
             }
             return [SolutionAudit]::new($solutionFile, @(), $audits)
         }
@@ -458,7 +471,7 @@ $CustomDefinitions = {
             }
             $csprojs.Modern | ForEach-Object {
                 $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
-                Write-Warning -Message "ProjectsToScan= $ProjectsToScan - Ignoring project: $name"
+                Write-Warning -Message "ProjectsToScan='Modern' - Ignoring project: $name"
             }
             return [SolutionAudit]::new($solutionFile, $legacyAudits, @())
         }
@@ -754,6 +767,7 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
             $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
             . $customDefinitions
             $WarningPreference = $using:WarningPreference   
+            $DebugPreference = $using:DebugPreference
 
             $paths = $input.Group | Select-Object -ExpandProperty Solution
             $auditor = [VulnerabilityAuditor]::new($using:auditorSerialized)
@@ -828,23 +842,8 @@ Format-AuditResult $finalResult
 
 #region BuildBreaker
 if ($BuildBreaker) {
-    if ([string]::IsNullOrEmpty($BreakOnProjectType)) {
-        $BreakOnProjectType = 'All'
-    }
-
-    if ($null -eq $MinimumBreakLevel) {
-        if ($BreakOnProjectType -eq 'All' -and $finalResult.VulnerabilityCount.All.Total -gt 0) {
-            exit 1
-        }
-
-        if ($BreakOnProjectType -eq 'Modern' -and $finalResult.VulnerabilityCount.Modern.Total -gt 0) {
-            exit 1
-        }
-
-        if ($BreakOnProjectType -eq 'Legacy' -and $finalResult.VulnerabilityCount.Legacy.Total -gt 0) {
-            exit 1
-        }
-        exit 0
+    if ($BreakOnProjectType -eq 'All' -and $finalResult.VulnerabilityCount.All.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { 
+        exit 1 
     }
 
     if ($BreakOnProjectType -eq 'Modern' -and $finalResult.VulnerabilityCount.Modern.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
@@ -853,10 +852,6 @@ if ($BuildBreaker) {
 
     if ($BreakOnProjectType -eq 'Legacy' -and $finalResult.VulnerabilityCount.Legacy.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
         exit 1
-    }
-
-    if ($finalResult.VulnerabilityCount.All.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { 
-        exit 1 
     }
 }
 #endregion
