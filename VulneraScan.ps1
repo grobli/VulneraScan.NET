@@ -24,8 +24,6 @@ param (
 #endregion
 
 #region SetDefaults
-$ErrorActionPreference = 'Stop'
-
 if ([string]::IsNullOrEmpty($MinimumBreakLevel)) { $MinimumBreakLevel = 'Low' }
 if ([string]::IsNullOrEmpty($BreakOnProjectType)) { $BreakOnProjectType = 'All' }
 if ([string]::IsNullOrEmpty($ProjectsToScan)) { $ProjectsToScan = 'All' }
@@ -37,20 +35,22 @@ if ([string]::IsNullOrEmpty($RestoreToolPreference)) { $RestoreToolPreference = 
 [bool]$IsNugetExeAvailable = $false
 [bool]$IsDotnetExeAvailable = $false 
 
-try {
-    nuget.exe help | Out-Null
-    $IsNugetExeAvailable = $LASTEXITCODE -eq 0 
-}
-catch {
-    Write-Warning -Message "nuget.exe not found in system PATH"
-}
-
-try {
-    dotnet.exe --info | Out-Null
-    $IsDotnetExeAvailable = $LASTEXITCODE -eq 0
-}
-catch {
-    Write-Warning -Message "dotnet.exe not found in system PATH"
+if ($Restore) {
+    try {
+        nuget.exe help | Out-Null
+        $IsNugetExeAvailable = $LASTEXITCODE -eq 0 
+    }
+    catch {
+        Write-Warning -Message "nuget.exe not found in system PATH"
+    }
+    
+    try {
+        dotnet.exe --info | Out-Null
+        $IsDotnetExeAvailable = $LASTEXITCODE -eq 0
+    }
+    catch {
+        Write-Warning -Message "dotnet.exe not found in system PATH"
+    }
 }
 #endregion
 
@@ -135,7 +135,6 @@ $CustomDefinitions = {
                 $params = 'restore', "$path", '-NonInteractive'
                 Write-Debug -Message "Executing command: $command $params"
                 & $command $params | Write-Debug
-                if ($LASTEXITCODE -ne 0) { throw "nuget.exe restore failed" }
                 return
             }
         }
@@ -145,7 +144,6 @@ $CustomDefinitions = {
             $params = 'restore', "$path"
             Write-Debug -Message "Executing command: $command $params"
             & $command $params | Write-Debug
-            if ($LASTEXITCODE -ne 0) { throw "dotnet.exe restore failed" }
             return
         }
 
@@ -483,11 +481,7 @@ $CustomDefinitions = {
             catch {
                 $dict = @{}
                 $json = $response.Content | ConvertFrom-Json
-                $json | Get-Member -MemberType NoteProperty `
-                | Select-Object -ExpandProperty Name `
-                | ForEach-Object {
-                    $dict[$_] = $json.$_
-                }
+                $json.PSObject.Properties | ForEach-Object { $dict[$_.Name] = $_.Value }
                 return $dict
             }
         }
@@ -503,7 +497,7 @@ $CustomDefinitions = {
             $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
             $audits = $projects.Modern | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
             $projects.Legacy | ForEach-Object {
-                $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
+                $name = Join-Path -Path $_.File.Directory.Name -ChildPath $_.File.Name
                 Write-Warning -Message "ProjectsToScan='Modern' - Ignoring legacy project: $name"
             }
             return [SolutionAudit]::new($solutionFile, @(), $audits)
@@ -513,7 +507,7 @@ $CustomDefinitions = {
             $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
             $legacyAudits = $projects.Legacy | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
             $projects.Modern | ForEach-Object {
-                $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
+                $name = Join-Path -Path $_.File.Directory.Name -ChildPath $_.File.Name
                 Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring modern project: $name"
             }
             return [SolutionAudit]::new($solutionFile, $legacyAudits, @())
@@ -568,21 +562,22 @@ $CustomDefinitions = {
             try {
                 $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json -AsHashTable
                 $packages = $projectAssetsParsed.libraries.Values `
-                | Where-Object { $_.type -eq 'package' } `
                 | ForEach-Object {
-                    ($name, $version) = $_.path.Split('/')
-                    [Package]::new($name, $version)
+                    if ($_.type -eq 'package') {
+                        ($name, $version) = $_.path.Split('/')
+                        [Package]::new($name, $version)
+                    }
                 }
             }
             catch {
                 $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json
-                $packages = $projectAssetsParsed.libraries `
-                | Get-Member -MemberType NoteProperty `
-                | Select-Object -ExpandProperty Name `
-                | Where-Object { $projectAssetsParsed.libraries.$_.type -eq 'package' } `
+                $packages = $projectAssetsParsed.libraries.PSObject.Properties `
+                | Select-Object -ExpandProperty Value `
                 | ForEach-Object {
-                    ($name, $version) = $projectAssetsParsed.libraries.$_.path.Split('/')
-                    [Package]::new($name, $version)
+                    if ($_.type -eq 'package') {
+                        ($name, $version) = $_.path.Split('/')
+                        [Package]::new($name, $version)
+                    }
                 }
             }
             if (!$packages) { return @() }
@@ -838,6 +833,11 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
             $DebugPreference = $using:DebugPreference
             $IsNugetExeAvailable = $using:IsNugetExeAvailable
             $IsDotnetExeAvailable = $using:IsDotnetExeAvailable
+            $FindPatchedOnline = $using:FindPatchedOnline
+            $ProjectsToScan = $using:ProjectsToScan
+            $Restore = $using:Restore
+            $RestoreActionPreference = $using:RestoreActionPreference
+            $RestoreToolPreferenc = $using:RestoreToolPreferenc
 
             $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
             . $customDefinitions
@@ -895,7 +895,7 @@ if (Test-Path -Path $SolutionPath -PathType Leaf) {
     $finalResult = Invoke-SolutionVulnerabilityScan $auditor $slnFile $ProjectsToScan $FindPatchedOnline
 }
 elseif ($Recurse) {
-    $solutionPaths = @(Get-ChildItem -Path $SolutionPath -Filter *.sln -Recurse -Force -ErrorAction SilentlyContinue)
+    $solutionPaths = Get-ChildItem -Path $SolutionPath -Filter *.sln -Recurse -Force -ErrorAction SilentlyContinue
     $finalResult = Invoke-PluralScan -Solutions $solutionPaths
 }
 else {
