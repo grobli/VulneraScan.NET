@@ -18,84 +18,76 @@ param (
     [Parameter()][switch]$Parallel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
     [Parameter()][switch]$Restore,
-    [Parameter()][ValidateSet('OnDemand', 'Always')]$RestorePreference
+    [Parameter()][ValidateSet('OnDemand', 'Always')]$RestoreActionPreference,
+    [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference
 )
 #endregion
-<# 
-    define all custom functions and classes inside wrapper ScriptBlock 
-    in order to use them in parallel execution with "Start-Job" 
-#>
 
 #region SetDefaults
+$ErrorActionPreference = 'Stop'
+
 if ([string]::IsNullOrEmpty($MinimumBreakLevel)) { $MinimumBreakLevel = 'Low' }
 if ([string]::IsNullOrEmpty($BreakOnProjectType)) { $BreakOnProjectType = 'All' }
 if ([string]::IsNullOrEmpty($ProjectsToScan)) { $ProjectsToScan = 'All' }
-if ([string]::IsNullOrEmpty($RestorePreference)) { $RestorePreference = 'OnDemand' }
+if ([string]::IsNullOrEmpty($RestoreActionPreference)) { $RestoreActionPreference = 'OnDemand' }
+if ([string]::IsNullOrEmpty($RestoreToolPreference)) { $RestoreToolPreference = 'Dotnet' }
 #endregion
 
+#region GlobalVariables
+[bool]$IsNugetExeAvailable = $false
+[bool]$IsDotnetExeAvailable = $false 
 
+try {
+    nuget.exe help | Out-Null
+    $IsNugetExeAvailable = $LASTEXITCODE -eq 0 
+}
+catch {
+    Write-Warning -Message "nuget.exe not found in system PATH"
+}
+
+try {
+    dotnet.exe --info | Out-Null
+    $IsDotnetExeAvailable = $LASTEXITCODE -eq 0
+}
+catch {
+    Write-Warning -Message "dotnet.exe not found in system PATH"
+}
+#endregion
+
+# define all custom functions and classes inside wrapper ScriptBlock 
+# in order to use them in parallel execution with "Start-Job" 
 $CustomDefinitions = {
     #region CommonFunctions
-    #region Get-PackagesConfig
-    function Get-PackagesConfig([System.IO.FileInfo]$projectCsproj) {
-        Get-ChildItem -Path $projectCsproj.Directory -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
-    }
-    #endregion
 
     #region Get-ProjectAssetsJson
-    function Get-ProjectAssetsJson([System.IO.FileInfo]$projectCsproj) {
-        if ($Restore -and $RestorePreference -eq 'Always') {
-            Invoke-DotnetRestore $projectCsproj
+    function Get-ProjectAssetsJson([Project]$Project) {
+        if ($Restore -and $RestoreActionPreference -eq 'Always') {
+            Invoke-ProjectRestore $Project
         }
 
-        $path = Join-Path -Path $projectCsproj.Directory.FullName -ChildPath 'obj\project.assets.json'
+        $path = Join-Path -Path $Project.File.Directory.FullName -ChildPath 'obj\project.assets.json'
         try {
             Get-ChildItem -Path $path -ErrorAction Stop -Force
         }
         catch {
             if ($Restore) {
-                Invoke-DotnetRestore $projectCsproj
-                return Get-ChildItem -Path $path -ErrorAction Stop -Force
+                Invoke-ProjectRestore $Project
+                return Get-ChildItem -Path $path -ErrorAction SilentlyContinue -Force
             }
-            throw "project.assets.json for project: '$projectCsproj' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
+            throw "project.assets.json for project: '$Project' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
         }
     }
     #endregion
-    
-    #region Test-LegacyNugetProject
-    function Test-LegacyNugetProject([System.IO.FileInfo]$projectCsproj) {
-        $packageReferences = [xml](Get-Content -Path $projectCsproj.FullName) `
-        | Select-Xml -XPath './/PackageReference' -ErrorAction SilentlyContinue `
-        | Select-Object -ExpandProperty Node
-    
-        $packagesConfig = Get-PackagesConfig $projectCsproj
-    
-        return $packageReferences.Count -eq 0 -and $packagesConfig
+
+    #region ConvertTo-Version
+    function ConvertTo-Version([string]$versionString) {
+        if (!$versionString) { return $null }
+        $versionString = $versionString.Split('-')[0]
+        return [version]$versionString
     }
     #endregion
 
-    #region Test-ModernNugetProject
-    function Test-ModernNugetProject([System.IO.FileInfo]$projectCsproj) {
-        $project = [xml](Get-Content -Path $projectCsproj.FullName) `
-        | Select-Xml -XPath './Project' -ErrorAction SilentlyContinue `
-        | Select-Object -ExpandProperty Node
-
-        if ($null -eq $project) { return $false }
-    
-        $sdkAttribute = $project.Attributes.GetNamedItem('Sdk')
-        return $null -ne $sdkAttribute
-    }
-    #endregion
-
-    #region Convert-NormalizedVersionString
-    function Convert-NormalizedVersionString([string]$versionString) {
-        @("(", ")", "[", "]") | ForEach-Object { $versionString = $versionString.Replace($_, '') }
-        ($versionString, $_) = $versionString.Split('-')
-        return $versionString
-    }
-    #endregion
-
-    #region Convert-NormalizedVersionString
+    #region ConvertTo-StandardObject
     function ConvertTo-StandardObject($InputObject) {          
         if ($InputObject -is [System.Collections.ICollection]) {
             $newArray = $InputObject | ForEach-Object {
@@ -134,14 +126,30 @@ $CustomDefinitions = {
     }
     #endregion
     
-    #region Invoke-DotnetRestore
-    function Invoke-DotnetRestore([System.IO.FileInfo]$ProjectCsproj) {
-        try {
-            dotnet.exe restore $ProjectCsproj.FullName | Write-Debug
+    #region Invoke-ProjectRestore
+    function Invoke-ProjectRestore([Project]$Project) {
+        $path = $Project.File.FullName 
+        if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
+            if ($IsNugetExeAvailable) {
+                $command = 'nuget.exe'
+                $params = 'restore', "$path", '-NonInteractive'
+                Write-Debug -Message "Executing command: $command $params"
+                & $command $params | Write-Debug
+                if ($LASTEXITCODE -ne 0) { throw "nuget.exe restore failed" }
+                return
+            }
         }
-        catch {
-            nuget.exe restore $ProjectCsproj.FullName | Write-Debug
+
+        if ($IsDotnetExeAvailable) {
+            $command = 'dotnet.exe'
+            $params = 'restore', "$path"
+            Write-Debug -Message "Executing command: $command $params"
+            & $command $params | Write-Debug
+            if ($LASTEXITCODE -ne 0) { throw "dotnet.exe restore failed" }
+            return
         }
+
+        throw "No tool for performing the NuGet restore is available on the machine. Install dotnet.exe or nuget.exe."
     }
     #endregion
     #endregion
@@ -201,18 +209,18 @@ $CustomDefinitions = {
         [SolutionAuditVulnerabilityCount]$VulnerabilityCount
         [ProjectAudit[]]$Projects
         [ProjectAudit[]]$LegacyProjects
-        [string]$FullPath
+        [string]$SolutionPath
     
         SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
-            $this.FullPath = $solutionFile.FullName
-            $this.SolutionName = $solutionFile.Name
+            $this.SolutionPath = $solutionFile.FullName
+            $this.SolutionName = $solutionFile.BaseName
             $this.LegacyProjects = $legacyAudits
             $this.Projects = $audits
             $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
         }
 
         SolutionAudit([PSCustomObject]$serialized) {
-            $this.FullPath = $serialized.FullPath
+            $this.SolutionPath = $serialized.SolutionPath
             $this.SolutionName = $serialized.SolutionName
             $this.Projects = $serialized.Projects
             $this.LegacyProjects = $serialized.LegacyProjects
@@ -226,19 +234,19 @@ $CustomDefinitions = {
         [string]$ProjectName
         [VulnerabilityCount]$VulnerabilityCount
         [PackageAudit[]]$VulnerablePackages
-        [string]$FullPath
+        [string]$ProjectPath
     
-        ProjectAudit([System.IO.FileInfo]$projectCsproj, [PackageAudit[]]$audits) {
-            $this.FullPath = $projectCsproj.FullName
-            $this.ProjectName = $projectCsproj.Name
+        ProjectAudit([Project]$project, [PackageAudit[]]$audits) {
+            $this.ProjectName = $project.File.BaseName
+            $this.ProjectPath = $project.File.FullName
             $this.VulnerablePackages = $audits
             $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
             $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
         }
 
         ProjectAudit([PSCustomObject]$serialized) {
-            $this.FullPath = $serialized.FullPath
             $this.ProjectName = $serialized.ProjectName
+            $this.ProjectPath = $serialized.ProjectPath
             $this.VulnerablePackages = $serialized.VulnerablePackages
             $this.VulnerabilityCount = $serialized.VulnerabilityCount
         }
@@ -253,9 +261,9 @@ $CustomDefinitions = {
         [VulnerabilityCount]$VulnerabilityCount
         [Vulnerability[]]$Vulnerabilities
 
-        PackageAudit([string]$name, [version]$version, [Vulnerability[]]$vulnerabilities) {
-            $this.PackageName = $name
-            $this.PackageVersion = $version
+        PackageAudit([Package]$package, [Vulnerability[]]$vulnerabilities) {
+            $this.PackageName = $package.Name
+            $this.PackageVersion = $package.Version
             $this.Vulnerabilities = $vulnerabilities
             $this.FirstPatchedVersion = $this.GetPatchedVersion()
             $this.VulnerabilityCount = [VulnerabilityCount]::Create($this.Vulnerabilities)
@@ -395,6 +403,49 @@ $CustomDefinitions = {
         }
     }
     #endregion
+
+    #region Package
+    class Package {
+        [string]$Name
+        [version]$Version
+
+        Package([string]$name, [string]$version) {
+            $this.Name = $name.ToLower()
+            $this.Version = ConvertTo-Version $version
+        }
+
+        [string]ToString() {
+            return $this.Name + $this.Version.ToString()
+        }
+    }
+    #endregion
+
+    #region Project
+    class Project {
+        [System.IO.FileInfo]$File
+        [System.IO.FileInfo]$Solution
+        [bool]$IsLegacy
+        hidden [System.IO.FileInfo]$PackagesConfig
+
+        Project([string]$projectPath, [string]$solutionPath) {
+            $this.File = $projectPath
+            $this.Solution = $solutionPath
+            $this.PackagesConfig = $this.GetPackagesConfig()
+            $this.IsLegacy = $null -ne $this.PackagesConfig
+        }
+
+        [bool]HasPackageReferences() {
+            $packageReferences = [xml](Get-Content -Path $this.File.FullName) `
+            | Select-Xml -XPath './/PackageReference' -ErrorAction SilentlyContinue `
+            | Select-Object -ExpandProperty Node
+            return $null -ne $packageReferences
+        }
+
+        hidden [System.IO.FileInfo]GetPackagesConfig() {
+            return Get-ChildItem -Path $this.File.Directory.FullName -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
+        }
+    }
+    #endregion
     #endregion
     
     #region VulnerabilityAuditor
@@ -442,85 +493,85 @@ $CustomDefinitions = {
         }
 
         [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $csprojs = [VulnerabilityAuditor]::GetModernAndLegacyCsprojs($solutionFile)
-            $legacyAudits = $csprojs.Legacy | ForEach-Object {
-                $this.RunLegacyProjectAudit($_, $findPatchedOnline)
-            }
-            $audits = $csprojs.Modern | ForEach-Object {
-                $this.RunProjectAudit($_, $findPatchedOnline)
-            }
+            $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
+            $legacyAudits = $projects.Legacy | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            $audits = $projects.Modern | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
             return [SolutionAudit]::new($solutionFile, $legacyAudits, $audits)
         }
 
         [SolutionAudit]RunModernSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $csprojs = [VulnerabilityAuditor]::GetModernAndLegacyCsprojs($solutionFile)
-            $audits = $csprojs.Modern | ForEach-Object {
-                $this.RunProjectAudit($_, $findPatchedOnline)
-            }
-            $csprojs.Legacy | ForEach-Object {
+            $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
+            $audits = $projects.Modern | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            $projects.Legacy | ForEach-Object {
                 $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
-                Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring project: $name"
+                Write-Warning -Message "ProjectsToScan='Modern' - Ignoring legacy project: $name"
             }
             return [SolutionAudit]::new($solutionFile, @(), $audits)
         }
 
         [SolutionAudit]RunLegacySolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $csprojs = [VulnerabilityAuditor]::GetModernAndLegacyCsprojs($solutionFile)
-            $legacyAudits = $csprojs.Legacy | ForEach-Object {
-                $this.RunLegacyProjectAudit($_, $findPatchedOnline)
-            }
-            $csprojs.Modern | ForEach-Object {
+            $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
+            $legacyAudits = $projects.Legacy | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            $projects.Modern | ForEach-Object {
                 $name = Join-Path -Path $_.Directory.Name -ChildPath $_.Name
-                Write-Warning -Message "ProjectsToScan='Modern' - Ignoring project: $name"
+                Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring modern project: $name"
             }
             return [SolutionAudit]::new($solutionFile, $legacyAudits, @())
         }
 
-        hidden static [PSCustomObject]GetModernAndLegacyCsprojs([System.IO.FileInfo]$solutionFile) {
-            $projectCsprojs = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
-
-            if (!$projectCsprojs) {
+        hidden static [PSCustomObject]GetModernAndLegacyProjects([System.IO.FileInfo]$solutionFile) {
+            $projects = [VulnerabilityAuditor]::ParseSolutionFile($solutionFile)
+            if (!$projects) {
                 return [PSCustomObject]@{
                     Legacy = @()
                     Modern = @()
                 }
             }
-
-            $legacy = $projectCsprojs | Where-Object { Test-LegacyNugetProject $_ } 
-            $modern = $projectCsprojs | Where-Object { Test-ModernNugetProject $_ } 
             return [PSCustomObject]@{
-                Legacy = $legacy
-                Modern = $modern
+                Legacy = $projects | Where-Object { $_.IsLegacy } 
+                Modern = $projects | Where-Object { -not $_.IsLegacy } 
             }
         }
-    
-        [ProjectAudit]RunLegacyProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatchedOnline) {
-            $packagesConfig = Get-PackagesConfig $projectCsproj
-            $packages = [xml](Get-Content $packagesConfig.FullName) `
+
+        hidden [ProjectAudit]RunProjectAudit([Project]$project, [bool]$findPatchedOnline) {
+            $packages = if ($project.IsLegacy) { [VulnerabilityAuditor]::ReadPackagesConfig($project) } 
+            else { [VulnerabilityAuditor]::ReadProjectAssetsJson($project) }
+
+            $audits = $packages `
+            | ForEach-Object { $this.RunPackageAudit($_, $findPatchedOnline) } `
+            | Where-Object { $_.VulnerabilityCount.Total -gt 0 }
+            return [ProjectAudit]::new($project, $audits)
+        }
+
+        hidden static [Package[]]ReadPackagesConfig([Project]$project) {
+            $packages = [xml](Get-Content $project.PackagesConfig.FullName) `
             | Select-Xml -XPath './/package' `
-            | Select-Object -ExpandProperty Node
-
-            $audits = $packages | ForEach-Object {
-                $version = Convert-NormalizedVersionString $_.version
-                $audit = $this.RunPackageAudit($_.id, $version, $findPatchedOnline)
-                if ($audit.VulnerabilityCount.Total -gt 0) {
-                    $audit
-                }
+            | Select-Object -ExpandProperty Node `
+            | ForEach-Object {
+                [Package]::new($_.id, $_.version)
             }
-            return [ProjectAudit]::new($projectCsproj, $audits)
+            if (!$packages) { return @() }
+            return $packages
         }
 
-        [ProjectAudit]RunProjectAudit([System.IO.FileInfo]$projectCsproj, [bool]$findPatchedOnline) {
-            $projectAssetsJson = Get-ProjectAssetsJson $projectCsproj
-            $projectAssetsContent = Get-Content -Path $projectAssetsJson 
+        hidden static [Package[]]ReadProjectAssetsJson([Project]$project) {
+            if (!$project.HasPackageReferences()) {
+                return @()
+            }
 
+            $projectAssetsJson = Get-ProjectAssetsJson $project
+            if (!$projectAssetsJson) {
+                return @()
+            }
+
+            $projectAssetsContent = Get-Content -Path $projectAssetsJson 
             try {
                 $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json -AsHashTable
                 $packages = $projectAssetsParsed.libraries.Values `
                 | Where-Object { $_.type -eq 'package' } `
                 | ForEach-Object {
                     ($name, $version) = $_.path.Split('/')
-                    [PSCustomObject]@{ Name = $name; Version = $version } 
+                    [Package]::new($name, $version)
                 }
             }
             catch {
@@ -531,31 +582,24 @@ $CustomDefinitions = {
                 | Where-Object { $projectAssetsParsed.libraries.$_.type -eq 'package' } `
                 | ForEach-Object {
                     ($name, $version) = $projectAssetsParsed.libraries.$_.path.Split('/')
-                    [PSCustomObject]@{Name = $name; Version = $version } 
+                    [Package]::new($name, $version)
                 }
             }
-
-            $audits = $packages | ForEach-Object {
-                $version = Convert-NormalizedVersionString $_.Version
-                $audit = $this.RunPackageAudit($_.Name, $version, $findPatchedOnline)
-                if ($audit.VulnerabilityCount.Total -gt 0) {
-                    $audit
-                }
-            }
-            return [ProjectAudit]::new($projectCsproj, $audits)
+            if (!$packages) { return @() }
+            return $packages
         }
     
-        [PackageAudit]RunPackageAudit([string]$packageName, [version]$packageVersion, [bool]$findPatchedOnline) {
-            $cacheKey = $packageName + $packageVersion.ToString()
+        [PackageAudit]RunPackageAudit([Package]$package, [bool]$findPatchedOnline) {
+            $cacheKey = $package.ToString()
             if ($this.AuditCache.ContainsKey($cacheKey)) {
                 return $this.AuditCache[$cacheKey]
             }
 
-            $vBase = $this.SearchInData($this.Base, $packageName, $packageVersion)
-            $vUpdate = $this.SearchInData($this.Update, $packageName, $packageVersion)
+            $vBase = $this.SearchInData($this.Base, $package)
+            $vUpdate = $this.SearchInData($this.Update, $package)
             $allVulnerabilities = $($vBase; $vUpdate)
 
-            $audit = [PackageAudit]::new($packageName, $packageVersion, $allVulnerabilities)
+            $audit = [PackageAudit]::new($package, $allVulnerabilities)
             if ($allVulnerabilities.Count -gt 0 -and -not $audit.FirstPatchedVersion -and $findPatchedOnline) {
                 $patchedVersion = $this.FindPatchedVersionOnline($allVulnerabilities)
                 $audit.FirstPatchedVersion = $patchedVersion
@@ -565,20 +609,22 @@ $CustomDefinitions = {
             return $audit
         }
     
-        hidden [Vulnerability[]]SearchInData([hashtable]$data, [string]$packageName, [version]$packageVersion) {
-            if (!$data.ContainsKey($packageName)) {
+        hidden [Vulnerability[]]SearchInData([hashtable]$data, [Package]$package) {
+            if (!$data.ContainsKey($package.Name)) {
                 return @()
             }
 
-            $vulnerabilities = New-Object Collections.Generic.List[Vulnerability]
-            $data[$packageName] | ForEach-Object {
+            $vulnerabilities = $data[$package.Name]  `
+            | ForEach-Object {
                 $vrange = [VersionRange]::Parse($_.versions)
-                $vulnerability = [Vulnerability]::new($_.severity, $_.url, $vrange)
-                if ($vulnerability.VersionRange.CheckInRange($packageVersion)) {
-                    $vulnerabilities.Add($vulnerability)
-                }  
-            }    
-            return $vulnerabilities.ToArray()
+                [Vulnerability]::new($_.severity, $_.url, $vrange)
+            } `
+            | Where-Object { $_.VersionRange.CheckInRange($package.Version) }
+
+            if (!$vulnerabilities) {
+                return @()
+            }
+            return $vulnerabilities
         }
 
         hidden [string]FindPatchedVersionOnline([Vulnerability[]]$vulnerabilities) {
@@ -595,22 +641,31 @@ $CustomDefinitions = {
                 | Select-Object -ExpandProperty vulnerabilities `
                 | Where-Object { $_.package.ecosystem -eq 'nuget' } `
                 | Select-Object -ExpandProperty first_patched_version `
-                | ForEach-Object { [version](Convert-NormalizedVersionString $_) } `
+                | ForEach-Object { ConvertTo-Version $_ } `
             }
             return ($patchedVersions | Sort-Object -Descending)[0]
         }
     
-        hidden static [System.IO.FileInfo[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
+        hidden static [Project[]]ParseSolutionFile([System.IO.FileInfo]$solutionFile) {
             $content = Get-Content -Path $solutionFile.FullName
             $solutionDir = $solutionFile.Directory.FullName
 
-            $projects = $content | Where-Object { [VulnerabilityAuditor]::IsProjectLine($_) } | ForEach-Object {
+            $projects = $content `
+            | Where-Object { [VulnerabilityAuditor]::IsProjectLine($_) } `
+            | ForEach-Object {
                 ($name, $path) = $_.Split(',')
                 ($path, $guid) = $path.Split('{')
                 $path = $path.Replace('"', '').Trim()
-                [System.IO.FileInfo](Join-Path -Path $solutionDir -ChildPath $path)
+                Join-Path -Path $solutionDir -ChildPath $path
+            } `
+            | Where-Object { Test-Path -Path $_ } `
+            | Sort-Object `
+            | ForEach-Object { [Project]::new($_, $solutionFile.FullName) }
+
+            if (!$projects) {
+                return @()
             }
-            return $projects | Where-Object { Test-Path -Path $_.FullName } | Sort-Object
+            return $projects
         }
 
         hidden static [bool]IsProjectLine([string]$line) {
@@ -639,7 +694,8 @@ $CustomDefinitions = {
     
         hidden static [version]$DefaultMin = [version]'0.0.0'
         hidden static [version]$DefaultMax = [version]'9999.9999.9999'
-    
+        hidden static [string[]]$Brackets = "(", ")", "[", "]"
+
         VersionRange() {
             $this.Min = [VersionRange]::DefaultMin
             $this.Max = [VersionRange]::DefaultMax
@@ -661,18 +717,23 @@ $CustomDefinitions = {
             $vrange.IsMaxInclusive = $max.EndsWith(']')
             
             # set Min version
-            $minVersionString = Convert-NormalizedVersionString $min
-            if (![string]::IsNullOrEmpty($minVersionString)) {
-                $vrange.Min = [version]$minVersionString
+            $minVersion = ConvertTo-Version ([VersionRange]::RemoveBracketsFromVersionString($min))
+            if ($minVersion) {
+                $vrange.Min = $minVersion
             }
     
             # set Max version
-            $maxVersionString = Convert-NormalizedVersionString $max
-            if (![string]::IsNullOrEmpty($maxVersionString)) {
-                $vrange.Max = [version]$maxVersionString 
+            $maxVersion = ConvertTo-Version ([VersionRange]::RemoveBracketsFromVersionString($max))
+            if ($maxVersion) {
+                $vrange.Max = $maxVersion
             }
     
             return $vrange     
+        }
+
+        static [string]RemoveBracketsFromVersionString([string]$versionString) {
+            [VersionRange]::Brackets | ForEach-Object { $versionString = $versionString.Replace($_, '') }
+            return $versionString
         }
     
         [bool]CheckInRange([version]$version) {
@@ -772,11 +833,15 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
         $auditor = [VulnerabilityAuditor]::new()
         $auditorSerialized = $auditor.Serialize()
         $scriptBlock = {
-            $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
-            . $customDefinitions
+            $ErrorActionPreference = $using:ErrorActionPreference
             $WarningPreference = $using:WarningPreference   
             $DebugPreference = $using:DebugPreference
+            $IsNugetExeAvailable = $using:IsNugetExeAvailable
+            $IsDotnetExeAvailable = $using:IsDotnetExeAvailable
 
+            $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
+            . $customDefinitions
+          
             $paths = $input.Group | Select-Object -ExpandProperty Solution
             $auditor = [VulnerabilityAuditor]::new($using:auditorSerialized)
 
