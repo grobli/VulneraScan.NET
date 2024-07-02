@@ -837,7 +837,7 @@ function Invoke-PluralScan([System.IO.FileInfo[]]$Solutions) {
             $ProjectsToScan = $using:ProjectsToScan
             $Restore = $using:Restore
             $RestoreActionPreference = $using:RestoreActionPreference
-            $RestoreToolPreferenc = $using:RestoreToolPreferenc
+            $RestoreToolPreference = $using:RestoreToolPreference
 
             $customDefinitions = [scriptblock]::Create($using:CustomDefinitions)
             . $customDefinitions
