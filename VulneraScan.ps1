@@ -496,50 +496,21 @@ $CustomDefinitions = {
     class SolutionParser {
         hidden static $ProjectLineBegin = 'project("'
         hidden static $CsprojExtension = '.csproj'
-        hidden static [string[]]$HeaderLines = @(
-            'Microsoft Visual Studio Solution File, Format Version 12.00', 
-            '# Visual Studio Version',
-            'VisualStudioVersion =',
-            'MinimumVisualStudioVersion ='
-        )
 
         static [Project[]]Parse([System.IO.FileInfo]$solutionFile) {
             [string[]]$content = Get-Content -Path $solutionFile.FullName
             $solutionDir = $solutionFile.Directory.FullName
-            $projects = [System.Collections.Generic.List[Project]]::new()
-
-            foreach ($line in $content) {
-                if ( [string]::IsNullOrWhiteSpace($line)`
-                        -or [SolutionParser]::IsHeaderLine($line) `
-                        -or $line.StartsWith('EndProject', [System.StringComparison]::InvariantCultureIgnoreCase)) { 
-                    continue
-                }
-                if ([SolutionParser]::IsProjectLine($line)) {
-                    if ([SolutionParser]::HasCsprojPath($line)) {
-                        ($name, $path) = $line.Split(',')
-                        ($path, $guid) = $path.Split('{')
-                        $path = $path.Replace('"', '').Trim()
-                        $path = Join-Path -Path $solutionDir -ChildPath $path
-                        $projects.Add([Project]::new($path, $solutionFile.FullName))
-                    }
-                    continue
-                }    
-                #is none of above - it means that Project Section is over
-                break   
+            $projects = $content `
+            | Where-Object { [SolutionParser]::IsProjectLine($_) -and [SolutionParser]::HasCsprojPath($_) } `
+            | ForEach-Object { 
+                ($name, $path) = $line.Split(',')
+                ($path, $guid) = $path.Split('{')
+                $path = $path.Replace('"', '').Trim()
+                $path = Join-Path -Path $solutionDir -ChildPath $path
+                [Project]::new($path, $solutionFile.FullName)
             }
-            if ($projects.Count -eq 0) {
-                return @()
-            }
-            return $projects.ToArray()
-        }
-
-        hidden static [bool]IsHeaderLine([string]$line) {    
-            foreach ($header in [SolutionParser]::HeaderLines) {
-                if ($line.StartsWith($header, [System.StringComparison]::InvariantCultureIgnoreCase)) {
-                    return $true
-                }
-            }
-            return $false
+            if ($projects) { return $projects }
+            return @()
         }
 
         hidden static [bool]IsProjectLine([string]$line) {
