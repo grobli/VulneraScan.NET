@@ -503,7 +503,7 @@ $CustomDefinitions = {
             $projects = $content `
             | Where-Object { [SolutionParser]::IsProjectLine($_) -and [SolutionParser]::HasCsprojPath($_) } `
             | ForEach-Object { 
-                ($name, $path) = $line.Split(',')
+                ($name, $path) = $_.Split(',')
                 ($path, $guid) = $path.Split('{')
                 $path = $path.Replace('"', '').Trim()
                 $path = Join-Path -Path $solutionDir -ChildPath $path
