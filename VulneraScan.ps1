@@ -393,6 +393,7 @@ $CustomDefinitions = {
         }
     }
     #endregion
+    #endregion
 
     #region Package
     class Package {
@@ -433,7 +434,7 @@ $CustomDefinitions = {
         }
 
         [bool]HasPackageReferences() {
-            $packageReferences = [xml](Get-Content -Path $this.File.FullName) `
+            $packageReferences = [xml]([System.IO.File]::ReadAllLines($this.File.FullName)) `
             | Select-Xml -XPath './/PackageReference' -ErrorAction SilentlyContinue `
             | Select-Object -ExpandProperty Node
             return $null -ne $packageReferences
@@ -445,7 +446,7 @@ $CustomDefinitions = {
         }
   
         hidden [string[]]ReadPackagesConfig() {
-            $packages = [xml](Get-Content $this.GetPackagesConfig().FullName) `
+            $packages = [xml]([System.IO.File]::ReadAllLines($this.GetPackagesConfig().FullName)) `
             | Select-Xml -XPath './/package' `
             | Select-Object -ExpandProperty Node `
             | ForEach-Object {
@@ -460,26 +461,17 @@ $CustomDefinitions = {
                 return @()
             }
 
-            $projectAssetsJson = Get-ProjectAssetsJson $this
-            if (!$projectAssetsJson) {
+            $projectAssetsJsonFile = Get-ProjectAssetsJson $this
+            if (!$projectAssetsJsonFile) {
                 return @()
             }
 
-            $projectAssetsContent = Get-Content -Path $projectAssetsJson 
-            try {
-                $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json -AsHashTable
-                $packages = $projectAssetsParsed.libraries.Values `
-                | ForEach-Object {
-                    if ($_.type -eq 'package') { return $_.path }
-                }
-            }
-            catch {
-                $projectAssetsParsed = $projectAssetsContent | ConvertFrom-Json
-                $packages = $projectAssetsParsed.libraries.PSObject.Properties `
-                | Select-Object -ExpandProperty Value `
-                | ForEach-Object {
-                    if ($_.type -eq 'package') { return $_.path }
-                }
+            $projectAssetsText = [System.IO.File]::ReadAllLines($projectAssetsJsonFile.FullName) 
+            [ProjectAssetsJson]$projectAssetsParsed = [Newtonsoft.Json.JsonConvert]::DeserializeObject($projectAssetsText, [ProjectAssetsJson])
+            
+            $packages = $projectAssetsParsed.libraries.Values `
+            | ForEach-Object {
+                if ($_.type -eq 'package') { return $_.path }
             }
             if ($packages) { return $packages }
             return @()
@@ -490,6 +482,55 @@ $CustomDefinitions = {
         }
     }
     #endregion
+
+    #region JsonModels
+    class ProjectAssetsJson {
+        [System.Collections.Generic.Dictionary[string, ProjectAssetsJsonLibrary]]$libraries
+    }
+
+    class ProjectAssetsJsonLibrary {
+        [string]$type
+        [string]$path
+    }
+
+    class NugetIndex {
+        [NugetIndexEntry]$Base
+        [NugetIndexEntry]$Update
+
+        NugetIndex() {
+            $this.Base = $null
+            $this.Update = $null
+        }
+
+        static [NugetIndex]FromResponse([System.Collections.Generic.Dictionary[string, string][]]$response) {
+            $nugetIndex = [NugetIndex]::new()
+            $response | ForEach-Object {
+                $entry = [NugetIndexEntry]::new($_)
+                if ($entry.Name -eq 'base') {
+                    $nugetIndex.Base = $entry
+                    return
+                }
+                $nugetIndex.Update = $entry
+            }
+            return $nugetIndex
+        }
+    }
+
+    class NugetIndexEntry {
+        [string]$Name
+        [string]$Id
+
+        NugetIndexEntry([System.Collections.Generic.Dictionary[string, string]]$responseEntry) {
+            $this.Name = $responseEntry['@name']
+            $this.Id = $responseEntry['@id']
+        }
+    }
+
+    class NugetVulnerabilityEntry {
+        [string]$url
+        [int]$severity
+        [string]$versions
+    }
     #endregion
 
     #region SolutionParser
@@ -498,7 +539,7 @@ $CustomDefinitions = {
         hidden static $CsprojExtension = '.csproj'
 
         static [Project[]]Parse([System.IO.FileInfo]$solutionFile) {
-            [string[]]$content = Get-Content -Path $solutionFile.FullName
+            $content = [System.IO.File]::ReadAllLines($solutionFile.FullName)
             $solutionDir = $solutionFile.Directory.FullName
             $projects = $content `
             | Where-Object { [SolutionParser]::IsProjectLine($_) -and [SolutionParser]::HasCsprojPath($_) } `
@@ -527,43 +568,59 @@ $CustomDefinitions = {
     #region VulnerabilityAuditor
     class VulnerabilityAuditor {
         hidden [string]$NugetVulnerabilityIndexUrl
-        hidden [hashtable]$Base
-        hidden [hashtable]$Update
+        hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$Base
+        hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$Update
         hidden [hashtable]$AdvisoriesCache
-        hidden [hashtable]$AuditWithVulnerabilitiesCache
+        hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]$AuditWithVulnerabilitiesCache
         hidden [System.Collections.Generic.HashSet[string]]$AuditNoVulnerableSet
+        hidden [System.Net.Http.HttpClient]$HttpClient
 
         VulnerabilityAuditor() {
             $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
             $this.AdvisoriesCache = @{}
-            $this.AuditWithVulnerabilitiesCache = @{}
-            $this.AuditNoVulnerableSet = New-Object System.Collections.Generic.HashSet[string]
+            $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+            $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[string]]::new()
+            $this.SetupHttpClient()
 
-            $index = Invoke-RestMethod $this.NugetVulnerabilityIndexUrl
-
-            $this.Base = [VulnerabilityAuditor]::FetchNuGetData($index, 'base')
-            $this.Update = [VulnerabilityAuditor]::FetchNuGetData($index, 'update')
+            $index = $this.FetchNugetIndex()
+            $this.Base = $this.FetchNuGetData($index.Base)
+            $this.Update = $this.FetchNuGetData($index.Update)
         }
 
         VulnerabilityAuditor([PSCustomObject]$serialized) {
             $this.NugetVulnerabilityIndexUrl = $serialized.NugetVulnerabilityIndexUrl
             $this.Base = $serialized.Base
             $this.Update = $serialized.Update
-            $this.AuditWithVulnerabilitiesCache = @{}
-            $this.AuditNoVulnerableSet = New-Object System.Collections.Generic.HashSet[string]
+            $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+            $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[string]]::new()
+            $this.SetupHttpClient()
         }
 
-        hidden static [hashtable]FetchNuGetData($index, [string]$nugetStoreId) {
-            $response = Invoke-WebRequest ($index | Where-Object -Property '@name' -eq $nugetStoreId).'@id'
-            try {
-                return $response.Content | ConvertFrom-Json -AsHashTable
-            }
-            catch {
-                $dict = @{}
-                $json = $response.Content | ConvertFrom-Json
-                $json.PSObject.Properties | ForEach-Object { $dict[$_.Name] = $_.Value }
-                return $dict
-            }
+        hidden [NugetIndex]FetchNugetIndex() {
+            $response = $this.MakeGetRequest($this.NugetVulnerabilityIndexUrl)
+            $deserialized = [Newtonsoft.Json.JsonConvert]::DeserializeObject($response, [System.Collections.Generic.Dictionary[string, string][]])
+            $index = [NugetIndex]::FromResponse($deserialized)
+            return $index
+        }
+
+        hidden [void]SetupHttpClient() {
+            $clientHandler = [System.Net.Http.HttpClientHandler]::new()
+            $clientHandler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip + [System.Net.DecompressionMethods]::Deflate
+            $this.HttpClient = [System.Net.Http.HttpClient]::new($clientHandler)
+            $this.HttpClient.DefaultRequestHeaders.Add('Accept', 'application/json')
+            $this.HttpClient.DefaultRequestHeaders.Add('Accept-Encoding', 'gzip, deflate')
+        }
+
+        hidden [string]MakeGetRequest([string]$url) {
+            return $this.HttpClient.GetStringAsync($url).GetAwaiter().GetResult()
+        }
+
+        hidden [System.Object]FetchNuGetData([NugetIndexEntry]$entry) {   
+
+            $response = $this.MakeGetRequest($entry.Id)
+            $entries = [Newtonsoft.Json.JsonConvert]::DeserializeObject($response, 
+                [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]])
+            return $entries
         }
 
         [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
@@ -653,11 +710,10 @@ $CustomDefinitions = {
             return @()
         }
     
-        hidden static [Vulnerability[]]SearchInData([hashtable]$data, [Package]$package) {
+        hidden static [Vulnerability[]]SearchInData([System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$data, [Package]$package) {
             if (!$data.ContainsKey($package.Name)) {
                 return @()
             }
-
             $vulnerabilities = $data[$package.Name]  `
             | ForEach-Object {
                 $vrange = [VersionRange]::Parse($_.versions)
@@ -708,7 +764,7 @@ $CustomDefinitions = {
         hidden static [version]$DefaultMin = [version]'0.0.0'
         hidden static [version]$DefaultMax = [version]'9999.9999.9999'
         hidden static [regex]$BracketRegex = [regex]::new("\(|\)|\[|\]", [System.Text.RegularExpressions.RegexOptions]::Compiled)
-        hidden static [hashtable]$Cache = @{}
+        hidden static $Cache = [System.Collections.Generic.Dictionary[string, VersionRange]]::new()
 
         VersionRange() {
             $this.Min = [VersionRange]::DefaultMin
@@ -771,7 +827,7 @@ $CustomDefinitions = {
 
     #region VersionConverter
     class VersionConverter {
-        hidden static [hashtable]$Cache = @{}
+        hidden static $Cache = [System.Collections.Generic.Dictionary[string, version]]::new()
 
         static [version]Convert([string]$versionString) {
             if ([VersionConverter]::Cache.ContainsKey($versionString)) {
