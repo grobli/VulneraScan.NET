@@ -15,7 +15,7 @@ param (
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType,
     [Parameter()][switch]$FindPatchedOnline,
-    [Parameter()][switch]$Parallel,
+  #  [Parameter()][switch]$Parallel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
     [Parameter()][switch]$Restore,
     [Parameter()][ValidateSet('OnDemand', 'Always')]$RestoreActionPreference,
@@ -24,6 +24,7 @@ param (
 #endregion
 
 #region SetDefaults
+$Parallel = $false
 if ([string]::IsNullOrEmpty($MinimumBreakLevel)) { $MinimumBreakLevel = 'Low' }
 if ([string]::IsNullOrEmpty($BreakOnProjectType)) { $BreakOnProjectType = 'All' }
 if ([string]::IsNullOrEmpty($ProjectsToScan)) { $ProjectsToScan = 'All' }
