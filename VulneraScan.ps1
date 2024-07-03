@@ -57,6 +57,7 @@ if ($Restore) {
 # define all custom functions and classes inside wrapper ScriptBlock 
 # in order to use them in parallel execution with "Start-Job" 
 $CustomDefinitions = {
+    Add-Type -AssemblyName System.Net.Http
     #region CommonFunctions
 
     #region Get-ProjectAssetsJson
@@ -467,12 +468,13 @@ $CustomDefinitions = {
             }
 
             $projectAssetsText = [System.IO.File]::ReadAllLines($projectAssetsJsonFile.FullName) 
-            [ProjectAssetsJson]$projectAssetsParsed = [Newtonsoft.Json.JsonConvert]::DeserializeObject($projectAssetsText, [ProjectAssetsJson])
-            
-            $packages = $projectAssetsParsed.libraries.Values `
+            $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+            $packages = $projectAssetsParsed.libraries.PSObject.Properties `
+            | Select-Object -ExpandProperty Value `
             | ForEach-Object {
                 if ($_.type -eq 'package') { return $_.path }
             }
+            
             if ($packages) { return $packages }
             return @()
         }
@@ -484,52 +486,16 @@ $CustomDefinitions = {
     #endregion
 
     #region JsonModels
-    class ProjectAssetsJson {
-        [System.Collections.Generic.Dictionary[string, ProjectAssetsJsonLibrary]]$libraries
-    }
-
-    class ProjectAssetsJsonLibrary {
-        [string]$type
-        [string]$path
-    }
-
-    class NugetIndex {
-        [NugetIndexEntry]$Base
-        [NugetIndexEntry]$Update
-
-        NugetIndex() {
-            $this.Base = $null
-            $this.Update = $null
-        }
-
-        static [NugetIndex]FromResponse([System.Collections.Generic.Dictionary[string, string][]]$response) {
-            $nugetIndex = [NugetIndex]::new()
-            $response | ForEach-Object {
-                $entry = [NugetIndexEntry]::new($_)
-                if ($entry.Name -eq 'base') {
-                    $nugetIndex.Base = $entry
-                    return
-                }
-                $nugetIndex.Update = $entry
-            }
-            return $nugetIndex
-        }
-    }
-
-    class NugetIndexEntry {
-        [string]$Name
-        [string]$Id
-
-        NugetIndexEntry([System.Collections.Generic.Dictionary[string, string]]$responseEntry) {
-            $this.Name = $responseEntry['@name']
-            $this.Id = $responseEntry['@id']
-        }
-    }
-
     class NugetVulnerabilityEntry {
-        [string]$url
-        [int]$severity
-        [string]$versions
+        [string]$Url
+        [int]$Severity
+        [string]$Versions
+
+        NugetVulnerabilityEntry([string]$url, [int]$severity, [string]$versions) {
+            $this.Url = $url
+            $this.Severity = $severity
+            $this.Versions = $versions
+        }
     }
     #endregion
 
@@ -596,10 +562,20 @@ $CustomDefinitions = {
             $this.SetupHttpClient()
         }
 
-        hidden [NugetIndex]FetchNugetIndex() {
+        hidden [PSCustomObject]FetchNugetIndex() {
             $response = $this.MakeGetRequest($this.NugetVulnerabilityIndexUrl)
-            $deserialized = [Newtonsoft.Json.JsonConvert]::DeserializeObject($response, [System.Collections.Generic.Dictionary[string, string][]])
-            $index = [NugetIndex]::FromResponse($deserialized)
+            $index = [PSCustomObject]@{
+                Base   = $null
+                Update = $null
+            }
+            $json = $response | ConvertFrom-Json
+            $json | ForEach-Object {
+                if ($_.'@name' -eq 'base') {
+                    $index.Base = $_.'@id'
+                    return
+                }
+                $index.Update = $_.'@id'
+            }
             return $index
         }
 
@@ -615,12 +591,19 @@ $CustomDefinitions = {
             return $this.HttpClient.GetStringAsync($url).GetAwaiter().GetResult()
         }
 
-        hidden [System.Object]FetchNuGetData([NugetIndexEntry]$entry) {   
-
-            $response = $this.MakeGetRequest($entry.Id)
-            $entries = [Newtonsoft.Json.JsonConvert]::DeserializeObject($response, 
-                [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]])
-            return $entries
+        hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]FetchNuGetData([string]$indexEntry) {   
+            $response = $this.MakeGetRequest($indexEntry)
+            $entriesDict = [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]::new()
+            $json = $response | ConvertFrom-Json
+            $json.PSObject.Properties `
+            | Select-Object -Property Name, Value `
+            | ForEach-Object {
+                $entries = $_.Value | ForEach-Object {
+                    [NugetVulnerabilityEntry]::new($_.url, $_.severity, $_.versions)
+                }
+                $entriesDict[$_.Name] = $entries
+            }
+            return $entriesDict
         }
 
         [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
