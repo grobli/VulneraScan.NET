@@ -211,12 +211,11 @@ class PackageAudit {
         $maxPatchedVersion = ($versions | Sort-Object -Descending)[0]
 
         # check if there is any uncertain version that is higher than inferred max patched version from Version Ranges
-        $this.Vulnerabilities | Where-Object { $_.VersionRange.IsMaxInclusive } | ForEach-Object {
-            if ($_.VersionRange.Max -gt $maxPatchedVersion) {
+        foreach ($vln in  @($this.Vulnerabilities | Where-Object { $_.VersionRange.IsMaxInclusive })) {
+            if ($vln.VersionRange.Max -gt $maxPatchedVersion) {
                 return $null
             }
         }
-
         return $maxPatchedVersion
     }
 }
