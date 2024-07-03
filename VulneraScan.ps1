@@ -441,7 +441,7 @@ class VulnerabilityAuditor {
             Base   = $null
             Update = $null
         }
-        $response = $this.MakeGetRequest($this.NugetVulnerabilityIndexUrl)
+        $response = [VulnerabilityAuditor]::MakeGetRequest($this.NugetVulnerabilityIndexUrl)
         $response | ForEach-Object {
             if ($_.'@name' -eq 'base') {
                 $index.Base = $_.'@id'
@@ -452,13 +452,13 @@ class VulnerabilityAuditor {
         return $index
     }
 
-    hidden [PSCustomObject]MakeGetRequest([string]$url) {
-        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing
+    hidden static [PSCustomObject]MakeGetRequest([string]$url) {
+        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing -ErrorAction Stop
     }
 
     hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]FetchNuGetData([string]$indexEntry) {   
         $entriesDict = [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]::new()
-        $response = $this.MakeGetRequest($indexEntry)
+        $response = [VulnerabilityAuditor]::MakeGetRequest($indexEntry)
         $response.PSObject.Properties `
         | Select-Object -Property Name, Value `
         | ForEach-Object {
@@ -559,7 +559,7 @@ class VulnerabilityAuditor {
                 $advisoryData = $this.AdvisoriesCache[$_.GhsaId]
             }
             else {
-                $advisoryData = Invoke-RestMethod $_.AdvisoryUrl.Replace('github', 'api.github')
+                $advisoryData = [VulnerabilityAuditor]::MakeGetRequest($_.AdvisoryUrl.Replace('github', 'api.github'))
                 $this.AdvisoriesCache[$_.GhsaId] = $advisoryData
             }
 
