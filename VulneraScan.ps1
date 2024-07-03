@@ -745,6 +745,9 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
                     $params = 'restore', "$path", '-NonInteractive', $forceParam
                     Write-Verbose -Message "Executing command: $command $params"
                     & $command $params | Write-Verbose
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Error "nuget.exe - restore operation failed - process finished with exit code: $LASTEXITCODE"
+                    }
                     return
                 }
             }
@@ -755,6 +758,9 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
                 $params = 'restore', "$path", $forceParam
                 Write-Verbose -Message "Executing command: $command $params"
                 & $command $params | Write-Verbose
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "dotnet.exe - restore operation failed - process finished with exit code: $LASTEXITCODE"
+                }
                 return
             }
             throw "No tool for performing the NuGet restore is available on the machine. Install dotnet.exe or nuget.exe."
