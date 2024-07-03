@@ -45,14 +45,6 @@ if ($Restore) {
 }
 #endregion
 
-try {
-    Add-Type -AssemblyName System.Text.Json
-    Write-Verbose -Message '[System.Json.Text] assembly found - JsonSerializer will be used for Json deserialization'
-}
-catch {
-    Write-Verbose -Message '[System.Json.Text] assembly not found - defaulting to standard ConvertTo-Json method'
-}
-
 #region CommonFunctions
 
 #region Get-ProjectAssetsJson
@@ -401,18 +393,12 @@ class Project {
 
     hidden static [string[]]ParseProjectAssetsJson([System.IO.FileInfo]$projectAssetsFile) {
         $projectAssetsText = [System.IO.File]::ReadAllLines($projectAssetsFile.FullName) 
-        try {
-            [ProjectAssetsJson]$projectAssetsJson = [System.Text.Json.JsonSerializer]::Deserialize[ProjectAssetsJson]($projectAssetsText)
-            $packageIds = $projectAssetsJson.libraries.Values | Where-Object { $_.type -eq 'package' } | Select-Object -ExpandProperty path
-        }
-        # fallback to built-in ConvertTo-Json
-        catch {
-            $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-            $packageIds = $projectAssetsParsed.libraries.PSObject.Properties `
-            | Select-Object -ExpandProperty Value `
-            | Where-Object -Property type -eq 'package' `
-            | Select-Object -ExpandProperty path
-        }
+        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+        $packageIds = $projectAssetsParsed.libraries.PSObject.Properties `
+        | Select-Object -ExpandProperty Value `
+        | Where-Object -Property type -eq 'package' `
+        | Select-Object -ExpandProperty path
+        
         if ($packageIds) { return $packageIds }
         return @()
     }
@@ -453,16 +439,7 @@ class Package {
 }
 #endregion
 
-class ProjectAssetsJson {
-    [System.Collections.Generic.Dictionary[string, ProjectAssetsJsonLibrary]]$libraries
-}
-
 #region JsonModels
-class ProjectAssetsJsonLibrary {
-    [string]$type
-    [string]$path
-}
-
 class NugetVulnerabilityEntry {
     [string]$Url
     [int]$Severity
