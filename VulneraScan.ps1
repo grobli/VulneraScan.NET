@@ -81,7 +81,7 @@ class SolutionAuditPlural {
 
     SolutionAuditPlural([SolutionAudit[]]$solutions) {
         $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
-        $this.Solutions = $solutions
+        $this.Solutions = $solutions | Sort-Object -Property SolutionName
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
     }
 }
@@ -97,7 +97,7 @@ class SolutionAudit {
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
         $this.SolutionName = $solutionFile.BaseName
-        $this.Projects = $audits + $legacyAudits
+        $this.Projects = ($audits + $legacyAudits) | Sort-Object -Property ProjectName
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
     }
 }
@@ -115,7 +115,7 @@ class ProjectAudit {
         $this.ProjectName = $project.File.BaseName
         $this.ProjectPath = $project.File.FullName
         $this.ProjectType = if ($project.IsLegacy) { 'Legacy' } else { 'Modern' }
-        $this.VulnerablePackages = $audits
+        $this.VulnerablePackages = $audits | Sort-Object -Property PackageName
         $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
     }
@@ -133,7 +133,7 @@ class PackageAudit {
     PackageAudit([Package]$package) {
         $this.PackageName = $package.Name
         $this.PackageVersion = $package.Version
-        $this.Vulnerabilities = $package.Vulnerabilities
+        $this.Vulnerabilities = $package.Vulnerabilities | Sort-Object -Property Severity -Descending
         $this.FirstPatchedVersion = $this.GetPatchedVersion()
         $this.VulnerabilityCount = [VulnerabilityCount]::Create($this.Vulnerabilities)
     }
