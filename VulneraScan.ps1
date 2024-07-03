@@ -741,25 +741,24 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
             if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
                 if ($IsNugetExeAvailable) {
                     $command = 'nuget.exe'
-                    $forceParam = if ($RestoreActionPreference -eq 'Force') { '-Force' } else { '' }
                     $params = 'restore', "$path", '-NonInteractive', '-Verbosity', 'quiet', $forceParam
+                    if ($RestoreActionPreference -eq 'Force') { $params += '-Force' } 
                     Write-Verbose -Message "Executing command: $command $params"
                     & $command $params | Write-Verbose
                     if ($LASTEXITCODE -ne 0) {
-                        Write-Error "nuget.exe - restore operation failed - process finished with exit code: $LASTEXITCODE"
+                        Write-Error "$command $params - operation failed - process finished with exit code: $LASTEXITCODE"
                     }
                     return
                 }
             }
-
             if ($IsDotnetExeAvailable) {
                 $command = 'dotnet.exe'
-                $forceParam = if ($RestoreActionPreference -eq 'Force') { '--force' } else { '' }
                 $params = 'restore', "$path", '--verbosity', 'quiet', $forceParam
+                if ($RestoreActionPreference -eq 'Force') { $params += '--force' }
                 Write-Verbose -Message "Executing command: $command $params"
                 & $command $params | Write-Verbose
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Error "dotnet.exe - restore operation failed - process finished with exit code: $LASTEXITCODE"
+                    Write-Error "$command $params - operation failed - process finished with exit code: $LASTEXITCODE"
                 }
                 return
             }
