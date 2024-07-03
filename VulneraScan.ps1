@@ -498,14 +498,6 @@ class VulnerabilityAuditor {
         return $index
     }
 
-    hidden [void]SetupHttpClient() {
-        $clientHandler = [System.Net.Http.HttpClientHandler]::new()
-        $clientHandler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip + [System.Net.DecompressionMethods]::Deflate
-        $this.HttpClient = [System.Net.Http.HttpClient]::new($clientHandler)
-        $this.HttpClient.DefaultRequestHeaders.Add('Accept', 'application/json')
-        $this.HttpClient.DefaultRequestHeaders.Add('Accept-Encoding', 'gzip, deflate')
-    }
-
     hidden [PSCustomObject]MakeGetRequest([string]$url) {
         return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing
     }
