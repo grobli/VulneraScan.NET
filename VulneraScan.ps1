@@ -742,7 +742,7 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
                 if ($IsNugetExeAvailable) {
                     $command = 'nuget.exe'
                     $forceParam = if ($RestoreActionPreference -eq 'Force') { '-Force' } else { '' }
-                    $params = 'restore', "$path", '-NonInteractive', $forceParam
+                    $params = 'restore', "$path", '-NonInteractive', '-Verbosity quiet', $forceParam
                     Write-Verbose -Message "Executing command: $command $params"
                     & $command $params | Write-Verbose
                     if ($LASTEXITCODE -ne 0) {
@@ -755,7 +755,7 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
             if ($IsDotnetExeAvailable) {
                 $command = 'dotnet.exe'
                 $forceParam = if ($RestoreActionPreference -eq 'Force') { '--force' } else { '' }
-                $params = 'restore', "$path", $forceParam
+                $params = 'restore', "$path", '--verbosity quiet', $forceParam
                 Write-Verbose -Message "Executing command: $command $params"
                 & $command $params | Write-Verbose
                 if ($LASTEXITCODE -ne 0) {
