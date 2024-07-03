@@ -15,7 +15,7 @@ param (
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType,
     [Parameter()][switch]$FindPatchedOnline,
-  #  [Parameter()][switch]$Parallel,
+    #  [Parameter()][switch]$Parallel,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
     [Parameter()][switch]$Restore,
     [Parameter()][ValidateSet('OnDemand', 'Always')]$RestoreActionPreference,
@@ -428,11 +428,13 @@ $CustomDefinitions = {
         [System.IO.FileInfo]$File
         [System.IO.FileInfo]$Solution
         [bool]$IsLegacy
+        hidden [System.IO.FileInfo]$PackagesConfigFile
 
         Project([string]$projectPath, [string]$solutionPath) {
             $this.File = $projectPath
             $this.Solution = $solutionPath
-            $this.IsLegacy = $null -ne $this.PackagesConfig
+            $this.PackagesConfigFile = $this.GetPackagesConfig()
+            $this.IsLegacy = $null -ne $this.PackagesConfigFile
         }
 
         [bool]HasPackageReferences() {
@@ -448,7 +450,7 @@ $CustomDefinitions = {
         }
   
         hidden [string[]]ReadPackagesConfig() {
-            $packages = [xml]([System.IO.File]::ReadAllLines($this.GetPackagesConfig().FullName)) `
+            $packages = [xml]([System.IO.File]::ReadAllLines($this.PackagesConfigFile.FullName)) `
             | Select-Xml -XPath './/package' `
             | Select-Object -ExpandProperty Node `
             | ForEach-Object {
@@ -482,6 +484,10 @@ $CustomDefinitions = {
 
         hidden [System.IO.FileInfo]GetPackagesConfig() {
             return Get-ChildItem -Path $this.File.Directory.FullName -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
+        }
+
+        [string]ToString() {
+            return $this.File.FullName
         }
     }
     #endregion
