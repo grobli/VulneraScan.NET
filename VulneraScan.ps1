@@ -737,7 +737,7 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
 
         #region Invoke-SolutionRestore
         function Invoke-SolutionRestore([System.IO.FileInfo]$TargetSolution) {
-            $path = $TargetSolution.Directory.FullName
+            $path = $TargetSolution.FullName
             if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
                 if ($IsNugetExeAvailable) {
                     $command = 'nuget.exe'
