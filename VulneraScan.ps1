@@ -683,7 +683,7 @@ function Format-AuditResult($AuditResult) {
         if ($AuditResult -is [SolutionAuditPlural]) {
             $AuditResult | Select-Object -ExpandProperty Solutions | ForEach-Object {
                 Format-SolutionAuditAsText -SolutionAudit $_
-                Write-Output =================================================================================================================================================
+                Write-Output ''.PadRight(105, '#')
             }
             return
         }
@@ -699,7 +699,7 @@ function Format-AuditResult($AuditResult) {
 
 #region Format-SolutionAuditAsText
 function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
-    $SolutionAudit | Select-Object -ExcludeProperty Projects, LegacyProjects, VulnerabilityCount | Format-Table
+    $SolutionAudit | Select-Object -Property SolutionName, SolutionPath | Format-Table
     Write-Output 'Vulnerability Count:'
     $SolutionAudit.VulnerabilityCount | Format-Table
     $SolutionAudit.Projects | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
