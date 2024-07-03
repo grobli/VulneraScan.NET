@@ -17,8 +17,9 @@ param (
     [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan = 'All',
     [Parameter()][switch]$Restore,
-    [Parameter()][ValidateSet('OnDemand', 'Always', 'Force')]$RestoreActionPreference = 'OnDemand' ,
-    [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet'
+    [Parameter()][ValidateSet('OnDemand', 'Always', 'Force')]$RestoreActionPreference = 'OnDemand',
+    [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet',
+    [Parameter()][int]$RestoreMaxParallelism = 0
 )
 #endregion
 
@@ -731,12 +732,13 @@ function Format-PackageAuditAsText([PackageAudit]$PackageAudit) {
 #region Invoke-ParallelRestore
 function Invoke-ParallelRestore([Solution[]]$Solutions) {
     $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+    $jobCount = if ($RestoreMaxParallelism -le 0) { $cpuCount } else { [math]::Min($cpuCount, $RestoreMaxParallelism) }
     $i = 0
     $batches = $Solutions `
     | ForEach-Object {
         [PSCustomObject]@{
             Solution = $_.File.FullName
-            BatchId  = $i++ % $cpuCount
+            BatchId  = $i++ % $jobCount
         } `
     } `
     | Group-Object -Property BatchId
