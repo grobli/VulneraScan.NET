@@ -108,15 +108,16 @@ $CustomDefinitions = {
     #region Invoke-SolutionVulnerabilityScan
     function Invoke-SolutionVulnerabilityScan([VulnerabilityAuditor]$Auditor, [System.IO.FileInfo]$SolutionFilePath, 
         [string]$ProjectsToBeScanned, [bool]$FindPatchedVersionOnline) {
+        $solution = [Solution]::Parse($SolutionFilePath)
         if ([string]::IsNullOrEmpty($ProjectsToBeScanned) -or $ProjectsToBeScanned -eq 'All') {
-            return $Auditor.RunSolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
+            return $Auditor.RunSolutionAudit($solution, $FindPatchedVersionOnline)
         }
 
         if ($ProjectsToBeScanned -eq 'Legacy') {
-            return $Auditor.RunLegacySolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
+            return $Auditor.RunLegacySolutionAudit($solution, $FindPatchedVersionOnline)
         }
 
-        return $Auditor.RunModernSolutionAudit($SolutionFilePath, $FindPatchedVersionOnline)
+        return $Auditor.RunModernSolutionAudit($solution, $FindPatchedVersionOnline)
     }
     #endregion
     
@@ -397,28 +398,43 @@ $CustomDefinitions = {
     #endregion
     #endregion
 
-    #region Package
-    class Package {
-        [string]$Name
-        [version]$Version
-        [Vulnerability[]]$Vulnerabilities
-        [string]$Id
+    #region Solution
+    class Solution {
+        [System.IO.FileInfo]$File
+        [Project[]]$LegacyProjects
+        [Project[]]$ModernProjects
 
-        Package([string]$id) {
-            ($n, $v) = $id.ToLower().Split('/')
-            $this.Name = $n
-            $this.Version = [VersionConverter]::Convert($v)
-            $this.Id = $id
+        hidden static $ProjectLineBegin = 'project("'
+        hidden static $CsprojExtension = '.csproj'
+
+        static [Solution]Parse([System.IO.FileInfo]$solutionFile) {
+            $solution = [Solution]::new()
+            $solution.File = $solutionFile
+
+            $content = [System.IO.File]::ReadAllLines($solutionFile.FullName)
+            $solutionDir = $solutionFile.Directory.FullName
+            $projs = $content `
+            | Where-Object { [Solution]::IsProjectLine($_) -and [Solution]::HasCsprojPath($_) } `
+            | ForEach-Object { 
+                ($name, $path) = $_.Split(',')
+                ($path, $guid) = $path.Split('{')
+                $path = $path.Replace('"', '').Trim()
+                $path = Join-Path -Path $solutionDir -ChildPath $path
+                [Project]::new($path, $solutionFile.FullName)
+            }
+            if (!$projs) { $projs = @() }
+            $solution.ModernProjects = @($projs | Where-Object { -not $_.IsLegacy })
+            $solution.LegacyProjects = @($projs | Where-Object { $_.IsLegacy })
+            return $solution
         }
 
-        Package([string]$name, [string]$version) {
-            $this.Name = $name.ToLower()
-            $this.Version = [VersionConverter]::Convert($version)
-            $this.Id = $this.Name + '/' + $this.Version.ToString()
+        hidden static [bool]IsProjectLine([string]$line) {
+            return $line.StartsWith([Solution]::ProjectLineBegin, [System.StringComparison]::InvariantCultureIgnoreCase)
         }
 
-        [string]ToString() {
-            return $this.Id
+        hidden static [bool]HasCsprojPath([string]$line) {
+            $line = $line.ToLowerInvariant()
+            return $line.Contains([Solution]::CsprojExtension)
         }
     }
     #endregion
@@ -492,6 +508,32 @@ $CustomDefinitions = {
     }
     #endregion
 
+    #region Package
+    class Package {
+        [string]$Name
+        [version]$Version
+        [Vulnerability[]]$Vulnerabilities
+        [string]$Id
+
+        Package([string]$id) {
+            ($n, $v) = $id.ToLower().Split('/')
+            $this.Name = $n
+            $this.Version = [VersionConverter]::Convert($v)
+            $this.Id = $id
+        }
+
+        Package([string]$name, [string]$version) {
+            $this.Name = $name.ToLower()
+            $this.Version = [VersionConverter]::Convert($version)
+            $this.Id = $this.Name + '/' + $this.Version.ToString()
+        }
+
+        [string]ToString() {
+            return $this.Id
+        }
+    }
+    #endregion
+
     #region JsonModels
     class NugetVulnerabilityEntry {
         [string]$Url
@@ -502,38 +544,6 @@ $CustomDefinitions = {
             $this.Url = $url
             $this.Severity = $severity
             $this.Versions = $versions
-        }
-    }
-    #endregion
-
-    #region SolutionParser
-    class SolutionParser {
-        hidden static $ProjectLineBegin = 'project("'
-        hidden static $CsprojExtension = '.csproj'
-
-        static [Project[]]Parse([System.IO.FileInfo]$solutionFile) {
-            $content = [System.IO.File]::ReadAllLines($solutionFile.FullName)
-            $solutionDir = $solutionFile.Directory.FullName
-            $projects = $content `
-            | Where-Object { [SolutionParser]::IsProjectLine($_) -and [SolutionParser]::HasCsprojPath($_) } `
-            | ForEach-Object { 
-                ($name, $path) = $_.Split(',')
-                ($path, $guid) = $path.Split('{')
-                $path = $path.Replace('"', '').Trim()
-                $path = Join-Path -Path $solutionDir -ChildPath $path
-                [Project]::new($path, $solutionFile.FullName)
-            }
-            if ($projects) { return $projects }
-            return @()
-        }
-
-        hidden static [bool]IsProjectLine([string]$line) {
-            return $line.StartsWith([SolutionParser]::ProjectLineBegin, [System.StringComparison]::InvariantCultureIgnoreCase)
-        }
-
-        hidden static [bool]HasCsprojPath([string]$line) {
-            $line = $line.ToLowerInvariant()
-            return $line.Contains([SolutionParser]::CsprojExtension)
         }
     }
     #endregion
@@ -613,45 +623,26 @@ $CustomDefinitions = {
             return $entriesDict
         }
 
-        [SolutionAudit]RunSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
-            $legacyAudits = $projects.Legacy | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
-            $audits = $projects.Modern | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
-            return [SolutionAudit]::new($solutionFile, $legacyAudits, $audits)
+        [SolutionAudit]RunSolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
+            $legacyAudits = $solution.LegacyProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            $audits = $solution.ModernProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            return [SolutionAudit]::new($solution.File, $legacyAudits, $audits)
         }
 
-        [SolutionAudit]RunModernSolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
-            $audits = $projects.Modern | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
-            $projects.Legacy | ForEach-Object {
-                $name = Join-Path -Path $_.File.Directory.Name -ChildPath $_.File.Name
-                Write-Warning -Message "ProjectsToScan='Modern' - Ignoring legacy project: $name"
+        [SolutionAudit]RunModernSolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
+            $audits = $solution.ModernProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            $solution.LegacyProjects | ForEach-Object {
+                Write-Warning -Message "ProjectsToScan='Modern' - Ignoring legacy project: $_"
             }
-            return [SolutionAudit]::new($solutionFile, @(), $audits)
+            return [SolutionAudit]::new($solution.File, @(), $audits)
         }
 
-        [SolutionAudit]RunLegacySolutionAudit([System.IO.FileInfo]$solutionFile, [bool]$findPatchedOnline) {
-            $projects = [VulnerabilityAuditor]::GetModernAndLegacyProjects($solutionFile)
-            $legacyAudits = $projects.Legacy | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
-            $projects.Modern | ForEach-Object {
-                $name = Join-Path -Path $_.File.Directory.Name -ChildPath $_.File.Name
-                Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring modern project: $name"
+        [SolutionAudit]RunLegacySolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
+            $legacyAudits = $solution.LegacyProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+            $solution.ModernProjects | ForEach-Object {
+                Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring modern project: $_"
             }
-            return [SolutionAudit]::new($solutionFile, $legacyAudits, @())
-        }
-
-        hidden static [PSCustomObject]GetModernAndLegacyProjects([System.IO.FileInfo]$solutionFile) {
-            $projects = [SolutionParser]::Parse($solutionFile)
-            if (!$projects) {
-                return [PSCustomObject]@{
-                    Legacy = @()
-                    Modern = @()
-                }
-            }
-            return [PSCustomObject]@{
-                Legacy = $projects | Where-Object { $_.IsLegacy } 
-                Modern = $projects | Where-Object { -not $_.IsLegacy } 
-            }
+            return [SolutionAudit]::new($solution.File, $legacyAudits, @())
         }
 
         hidden [ProjectAudit]RunProjectAudit([Project]$project, [bool]$findPatchedOnline) {
