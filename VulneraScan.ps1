@@ -12,22 +12,14 @@ param (
     [Parameter()][ValidateSet('Json', 'Xml', 'Text')]$Format,
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
-    [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel,
-    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType,
+    [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel = 'Low',
+    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType = 'All',
     [Parameter()][switch]$FindPatchedOnline,
-    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan,
+    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan = 'All',
     [Parameter()][switch]$Restore,
-    [Parameter()][ValidateSet('OnDemand', 'Always')]$RestoreActionPreference,
-    [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference
+    [Parameter()][ValidateSet('OnDemand', 'Always', 'Force')]$RestoreActionPreference = 'OnDemand' ,
+    [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet'
 )
-#endregion
-
-#region SetDefaults
-if ([string]::IsNullOrEmpty($MinimumBreakLevel)) { $MinimumBreakLevel = 'Low' }
-if ([string]::IsNullOrEmpty($BreakOnProjectType)) { $BreakOnProjectType = 'All' }
-if ([string]::IsNullOrEmpty($ProjectsToScan)) { $ProjectsToScan = 'All' }
-if ([string]::IsNullOrEmpty($RestoreActionPreference)) { $RestoreActionPreference = 'OnDemand' }
-if ([string]::IsNullOrEmpty($RestoreToolPreference)) { $RestoreToolPreference = 'Dotnet' }
 #endregion
 
 #region GlobalVariables
@@ -53,14 +45,19 @@ if ($Restore) {
 }
 #endregion
 
-# define all custom functions and classes inside wrapper ScriptBlock 
-# in order to use them in parallel execution with "Start-Job" 
+try {
+    Add-Type -AssemblyName System.Text.Json
+    Write-Verbose -Message '[System.Json.Text] assembly found - JsonSerializer will be used for Json deserialization'
+}
+catch {
+    Write-Verbose -Message '[System.Json.Text] assembly not found - defaulting to standard ConvertTo-Json method'
+}
 
 #region CommonFunctions
 
 #region Get-ProjectAssetsJson
 function Get-ProjectAssetsJson([Project]$Project) {
-    if ($Restore -and $RestoreActionPreference -eq 'Always') {
+    if ($Restore -and $RestoreActionPreference -ne 'OnDemand') {
         Invoke-ProjectRestore $Project
     }
 
@@ -84,18 +81,20 @@ function Invoke-ProjectRestore([Project]$Project) {
     if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
         if ($IsNugetExeAvailable) {
             $command = 'nuget.exe'
-            $params = 'restore', "$path", '-NonInteractive'
+            $forceParam = if ($RestoreActionPreference -eq 'Force') { '-Force' } else { '' }
+            $params = 'restore', "$path", '-NonInteractive', $forceParam
             Write-Debug -Message "Executing command: $command $params"
-            & $command $params | Write-Debug
+            & $command $params | Write-Verbose
             return
         }
     }
 
     if ($IsDotnetExeAvailable) {
         $command = 'dotnet.exe'
-        $params = 'restore', "$path"
+        $forceParam = if ($RestoreActionPreference -eq 'Force') { '--force' } else { '' }
+        $params = 'restore', "$path", $forceParam
         Write-Debug -Message "Executing command: $command $params"
-        & $command $params | Write-Debug
+        & $command $params | Write-Verbose
         return
     }
 
@@ -393,21 +392,28 @@ class Project {
         if (!$this.HasPackageReferences()) {
             return @()
         }
-
         $projectAssetsJsonFile = Get-ProjectAssetsJson $this
         if (!$projectAssetsJsonFile) {
             return @()
         }
+        return [Project]::ParseProjectAssetsJson($projectAssetsJsonFile)
+    }
 
-        $projectAssetsText = [System.IO.File]::ReadAllLines($projectAssetsJsonFile.FullName) 
-        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-        $packages = $projectAssetsParsed.libraries.PSObject.Properties `
-        | Select-Object -ExpandProperty Value `
-        | ForEach-Object {
-            if ($_.type -eq 'package') { return $_.path }
+    hidden static [string[]]ParseProjectAssetsJson([System.IO.FileInfo]$projectAssetsFile) {
+        $projectAssetsText = [System.IO.File]::ReadAllLines($projectAssetsFile.FullName) 
+        try {
+            [ProjectAssetsJson]$projectAssetsJson = [System.Text.Json.JsonSerializer]::Deserialize[ProjectAssetsJson]($projectAssetsText)
+            $packageIds = $projectAssetsJson.libraries.Values | Where-Object { $_.type -eq 'package' } | Select-Object -ExpandProperty path
         }
-            
-        if ($packages) { return $packages }
+        # fallback to built-in ConvertTo-Json
+        catch {
+            $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+            $packageIds = $projectAssetsParsed.libraries.PSObject.Properties `
+            | Select-Object -ExpandProperty Value `
+            | Where-Object -Property type -eq 'package' `
+            | Select-Object -ExpandProperty path
+        }
+        if ($packageIds) { return $packageIds }
         return @()
     }
 
@@ -447,7 +453,16 @@ class Package {
 }
 #endregion
 
+class ProjectAssetsJson {
+    [System.Collections.Generic.Dictionary[string, ProjectAssetsJsonLibrary]]$libraries
+}
+
 #region JsonModels
+class ProjectAssetsJsonLibrary {
+    [string]$type
+    [string]$path
+}
+
 class NugetVulnerabilityEntry {
     [string]$Url
     [int]$Severity
