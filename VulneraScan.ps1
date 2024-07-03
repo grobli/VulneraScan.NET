@@ -722,7 +722,7 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
             Solution = $_.File.FullName
             BatchId  = $i++ % $cpuCount
         } `
-    } 
+    } `
     | Group-Object -Property BatchId
 
     $scriptBlock = {
