@@ -92,14 +92,12 @@ class SolutionAudit {
     [string]$SolutionName
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
     [ProjectAudit[]]$Projects
-    [ProjectAudit[]]$LegacyProjects
     [string]$SolutionPath
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
         $this.SolutionName = $solutionFile.BaseName
-        $this.LegacyProjects = $legacyAudits
-        $this.Projects = $audits
+        $this.Projects = $audits + $legacyAudits
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
     }
 }
@@ -111,10 +109,12 @@ class ProjectAudit {
     [VulnerabilityCount]$VulnerabilityCount
     [PackageAudit[]]$VulnerablePackages
     [string]$ProjectPath
+    [string]$ProjectType
     
     ProjectAudit([Project]$project, [PackageAudit[]]$audits) {
         $this.ProjectName = $project.File.BaseName
         $this.ProjectPath = $project.File.FullName
+        $this.ProjectType = if ($project.IsLegacy) { 'Legacy' } else { 'Modern' }
         $this.VulnerablePackages = $audits
         $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
@@ -702,15 +702,27 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit | Select-Object -ExcludeProperty Projects, LegacyProjects, VulnerabilityCount | Format-Table
     Write-Output 'Vulnerability Count:'
     $SolutionAudit.VulnerabilityCount | Format-Table
-    $SolutionAudit.LegacyProjects | ForEach-Object {
-        $_ | Select-Object -ExcludeProperty VulnerablePackages | Format-Table
-        $_.VulnerablePackages | ForEach-Object {
-            $_ | Select-Object -ExcludeProperty Vulnerabilities | Format-Table 
-            $_.Vulnerabilities | Format-List 
-        }
-    } 
+    $SolutionAudit.Projects | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
 }
 #endregion
+
+function Format-ProjectAuditAsText([ProjectAudit]$ProjectAudit) {
+    $name = $ProjectAudit.ProjectName
+    Write-Output "======= $name ".PadRight(105, '=')
+    $ProjectAudit | Select-Object -ExcludeProperty ProjectName, VulnerablePackages | Format-List
+    if ($ProjectAudit.VulnerablePackages) {
+        $ProjectAudit.VulnerablePackages | ForEach-Object {
+            Format-PackageAuditAsText $_
+        }
+    }
+}
+
+function Format-PackageAuditAsText([PackageAudit]$PackageAudit) {
+    $name = $PackageAudit.PackageName
+    Write-Output "_______ $name ".PadRight(105, '_')
+    $PackageAudit | Select-Object -ExcludeProperty PackageName, Vulnerabilities | Format-List
+    $PackageAudit.Vulnerabilities | Select-Object -Property AdvisoryUrl, Severity | Format-List 
+}
 
 #region Invoke-ParallelRestore
 function Invoke-ParallelRestore([Solution[]]$Solutions) {
