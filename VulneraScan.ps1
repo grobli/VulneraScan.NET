@@ -22,8 +22,6 @@ param (
 )
 #endregion
 
-Add-Type -AssemblyName System.Net.Http
-
 #region SetDefaults
 if ([string]::IsNullOrEmpty($MinimumBreakLevel)) { $MinimumBreakLevel = 'Low' }
 if ([string]::IsNullOrEmpty($BreakOnProjectType)) { $BreakOnProjectType = 'All' }
@@ -322,10 +320,11 @@ class Solution {
     hidden static $ProjectLineBegin = 'project("'
     hidden static $CsprojExtension = '.csproj'
 
+    Solution() {}
+
     static [Solution]Parse([System.IO.FileInfo]$solutionFile) {
         $solution = [Solution]::new()
         $solution.File = $solutionFile
-
         $content = [System.IO.File]::ReadAllLines($solutionFile.FullName)
         $solutionDir = $solutionFile.Directory.FullName
         $projs = $content `
@@ -471,14 +470,12 @@ class VulnerabilityAuditor {
     hidden [hashtable]$AdvisoriesCache
     hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]$AuditWithVulnerabilitiesCache
     hidden [System.Collections.Generic.HashSet[string]]$AuditNoVulnerableSet
-    hidden [System.Net.Http.HttpClient]$HttpClient
 
     VulnerabilityAuditor() {
         $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
         $this.AdvisoriesCache = @{}
         $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
         $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[string]]::new()
-        $this.SetupHttpClient()
 
         $index = $this.FetchNugetIndex()
         $this.Base = $this.FetchNuGetData($index.Base)
@@ -486,13 +483,12 @@ class VulnerabilityAuditor {
     }
 
     hidden [PSCustomObject]FetchNugetIndex() {
-        $response = $this.MakeGetRequest($this.NugetVulnerabilityIndexUrl)
         $index = [PSCustomObject]@{
             Base   = $null
             Update = $null
         }
-        $json = $response | ConvertFrom-Json
-        $json | ForEach-Object {
+        $response = $this.MakeGetRequest($this.NugetVulnerabilityIndexUrl)
+        $response | ForEach-Object {
             if ($_.'@name' -eq 'base') {
                 $index.Base = $_.'@id'
                 return
@@ -510,15 +506,14 @@ class VulnerabilityAuditor {
         $this.HttpClient.DefaultRequestHeaders.Add('Accept-Encoding', 'gzip, deflate')
     }
 
-    hidden [string]MakeGetRequest([string]$url) {
-        return $this.HttpClient.GetStringAsync($url).GetAwaiter().GetResult()
+    hidden [PSCustomObject]MakeGetRequest([string]$url) {
+        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing
     }
 
     hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]FetchNuGetData([string]$indexEntry) {   
-        $response = $this.MakeGetRequest($indexEntry)
         $entriesDict = [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]::new()
-        $json = $response | ConvertFrom-Json
-        $json.PSObject.Properties `
+        $response = $this.MakeGetRequest($indexEntry)
+        $response.PSObject.Properties `
         | Select-Object -Property Name, Value `
         | ForEach-Object {
             $entries = $_.Value | ForEach-Object {
