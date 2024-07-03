@@ -683,7 +683,7 @@ function Format-AuditResult($AuditResult) {
         if ($AuditResult -is [SolutionAuditPlural]) {
             $AuditResult | Select-Object -ExpandProperty Solutions | ForEach-Object {
                 Format-SolutionAuditAsText -SolutionAudit $_
-                Write-Output ''.PadRight(105, '#')
+                Write-Output "`n".PadRight(106, '#')
             }
             return
         }
@@ -706,23 +706,27 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
 }
 #endregion
 
+#region Format-ProjectAuditAsText
 function Format-ProjectAuditAsText([ProjectAudit]$ProjectAudit) {
     $name = $ProjectAudit.ProjectName
     Write-Output "======= $name ".PadRight(105, '=')
-    $ProjectAudit | Select-Object -ExcludeProperty ProjectName, VulnerablePackages | Format-List
+    ($ProjectAudit | Select-Object -Property VulnerabilityCount, ProjectType, ProjectPath | Format-List | Out-String).TrimStart()
     if ($ProjectAudit.VulnerablePackages) {
         $ProjectAudit.VulnerablePackages | ForEach-Object {
             Format-PackageAuditAsText $_
         }
     }
 }
+#endregion
 
+#region Format-PackageAuditAsText
 function Format-PackageAuditAsText([PackageAudit]$PackageAudit) {
     $name = $PackageAudit.PackageName
     Write-Output "_______ $name ".PadRight(105, '_')
-    $PackageAudit | Select-Object -ExcludeProperty PackageName, Vulnerabilities | Format-List
-    $PackageAudit.Vulnerabilities | Select-Object -Property AdvisoryUrl, Severity | Format-List 
+    ($PackageAudit | Select-Object -Property PackageVersion, FirstPatchedVersion, VulnerabilityCount | Format-List | Out-String).Trim()
+    $PackageAudit.Vulnerabilities | Select-Object -Property AdvisoryUrl, Severity | Format-List
 }
+#endregion
 
 #region Invoke-ParallelRestore
 function Invoke-ParallelRestore([Solution[]]$Solutions) {
