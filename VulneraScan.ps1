@@ -44,56 +44,6 @@ if ($Restore) {
     }
 }
 #endregion
-
-#region CommonFunctions
-
-#region Get-ProjectAssetsJson
-function Get-ProjectAssetsJson([Project]$Project) {
-    if ($Restore -and $RestoreActionPreference -ne 'OnDemand') {
-        Invoke-ProjectRestore $Project
-    }
-
-    $path = Join-Path -Path $Project.File.Directory.FullName -ChildPath 'obj\project.assets.json'
-    try {
-        Get-ChildItem -Path $path -ErrorAction Stop -Force
-    }
-    catch {
-        if ($Restore) {
-            Invoke-ProjectRestore $Project
-            return Get-ChildItem -Path $path -ErrorAction SilentlyContinue -Force
-        }
-        throw "project.assets.json for project: '$Project' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
-    }
-}
-#endregion
-    
-#region Invoke-ProjectRestore
-function Invoke-ProjectRestore([Project]$Project) {
-    $path = $Project.File.FullName 
-    if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
-        if ($IsNugetExeAvailable) {
-            $command = 'nuget.exe'
-            $forceParam = if ($RestoreActionPreference -eq 'Force') { '-Force' } else { '' }
-            $params = 'restore', "$path", '-NonInteractive', $forceParam
-            Write-Debug -Message "Executing command: $command $params"
-            & $command $params | Write-Verbose
-            return
-        }
-    }
-
-    if ($IsDotnetExeAvailable) {
-        $command = 'dotnet.exe'
-        $forceParam = if ($RestoreActionPreference -eq 'Force') { '--force' } else { '' }
-        $params = 'restore', "$path", $forceParam
-        Write-Debug -Message "Executing command: $command $params"
-        & $command $params | Write-Verbose
-        return
-    }
-
-    throw "No tool for performing the NuGet restore is available on the machine. Install dotnet.exe or nuget.exe."
-}
-#endregion
-#endregion
     
 #region DataClasses
 enum Severity {
@@ -384,7 +334,7 @@ class Project {
         if (!$this.HasPackageReferences()) {
             return @()
         }
-        $projectAssetsJsonFile = Get-ProjectAssetsJson $this
+        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile($true)
         if (!$projectAssetsJsonFile) {
             return @()
         }
@@ -405,6 +355,19 @@ class Project {
 
     hidden [System.IO.FileInfo]GetPackagesConfig() {
         return Get-ChildItem -Path $this.File.Directory.FullName -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
+    }
+
+    [System.IO.FileInfo]GetProjectAssetsJsonFile([bool]$failOnNotFound) {
+        $path = Join-Path -Path $this.File.Directory.FullName -ChildPath 'obj\project.assets.json'
+        try {
+            return Get-ChildItem -Path $path -ErrorAction Stop -Force
+        }
+        catch {
+            if ($failOnNotFound) {
+                throw "project.assets.json for project: '$this' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
+            }
+            return $null
+        }
     }
 
     [string]ToString() {
@@ -749,8 +712,89 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
 }
 #endregion
 
+#region Invoke-ParallelRestore
+function Invoke-ParallelRestore([Solution[]]$Solutions) {
+    $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+    $i = 0
+    $batches = $Solutions `
+    | ForEach-Object {
+        [PSCustomObject]@{
+            Solution = $_.File.FullName
+            BatchId  = $i++ % $cpuCount
+        } `
+    } 
+    | Group-Object -Property BatchId
+
+    $scriptBlock = {
+        $ErrorActionPreference = $using:ErrorActionPreference
+        $WarningPreference = $using:WarningPreference   
+        $DebugPreference = $using:DebugPreference
+        $VerbosePreference = $using:VerbosePreference
+        $IsNugetExeAvailable = $using:IsNugetExeAvailable
+        $IsDotnetExeAvailable = $using:IsDotnetExeAvailable
+        $RestoreActionPreference = $using:RestoreActionPreference
+        $RestoreToolPreference = $using:RestoreToolPreference
+
+        #region Invoke-SolutionRestore
+        function Invoke-SolutionRestore([System.IO.FileInfo]$TargetSolution) {
+            $path = $TargetSolution.Directory.FullName
+            if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
+                if ($IsNugetExeAvailable) {
+                    $command = 'nuget.exe'
+                    $forceParam = if ($RestoreActionPreference -eq 'Force') { '-Force' } else { '' }
+                    $params = 'restore', "$path", '-NonInteractive', $forceParam
+                    Write-Verbose -Message "Executing command: $command $params"
+                    & $command $params | Write-Verbose
+                    return
+                }
+            }
+
+            if ($IsDotnetExeAvailable) {
+                $command = 'dotnet.exe'
+                $forceParam = if ($RestoreActionPreference -eq 'Force') { '--force' } else { '' }
+                $params = 'restore', "$path", $forceParam
+                Write-Verbose -Message "Executing command: $command $params"
+                & $command $params | Write-Verbose
+                return
+            }
+            throw "No tool for performing the NuGet restore is available on the machine. Install dotnet.exe or nuget.exe."
+        }
+        #endregion
+
+        $input.Group `
+        | Select-Object -ExpandProperty Solution `
+        | ForEach-Object { Invoke-SolutionRestore $_ }
+    }
+
+    try {    
+        $batches `
+        | ForEach-Object { $_ | Start-ThreadJob -ScriptBlock $scriptBlock } `
+        | Receive-Job -Wait -AutoRemoveJob
+    }
+    catch {
+        $batches `
+        | ForEach-Object { $_ | Start-Job -ScriptBlock $scriptBlock } `
+        | Receive-Job -Wait -AutoRemoveJob
+    }
+}
+#endregion
+
 #region Invoke-SolutionVulnerabilityScan
 function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
+    if ($Restore) {
+        if ($RestoreActionPreference -eq 'OnDemand') {
+            $solutionsToRestore = $Solution | ForEach-Object {
+                $projectsToBeRestored = @($_.ModernProjects | Where-Object { $null -eq $_.GetProjectAssetsJsonFile($false) })
+                if ($projectsToBeRestored) {
+                    return $_
+                }
+            }
+            Invoke-ParallelRestore $solutionsToRestore
+        }
+        else {
+            Invoke-ParallelRestore $Solution
+        }
+    }
     $auditor = [VulnerabilityAuditor]::new()
     $results = $Solution | ForEach-Object {
         if ($ProjectsToScan -eq 'All') {
