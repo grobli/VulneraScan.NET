@@ -9,7 +9,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)][string]$SolutionPath,
-    [Parameter()][ValidateSet('Json', 'Xml', 'Text')]$Format,
+    [Parameter()][ValidateSet('Json', 'Text')]$Format,
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel = 'Low',
@@ -19,7 +19,8 @@ param (
     [Parameter()][switch]$Restore,
     [Parameter()][ValidateSet('OnDemand', 'Always', 'Force')]$RestoreActionPreference = 'OnDemand',
     [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet',
-    [Parameter()][int]$RestoreMaxParallelism = 0
+    [Parameter()][int]$RestoreMaxParallelism = 0,
+    [Parameter()][switch]$OnlyProjectsWithVulnerabilities
 )
 #endregion
 
@@ -52,6 +53,7 @@ enum Severity {
     Moderate = 1
     High = 2
     Critical = 3
+    None = 4
 }
 
 #region Vulnerability
@@ -70,7 +72,7 @@ class Vulnerability {
     }
 
     [string]ToString() {
-        return $this.AdvisoryUrl
+        return $this.GhsaId
     }
 }
 #endregion
@@ -79,11 +81,27 @@ class Vulnerability {
 class SolutionAuditPlural {
     [SolutionAudit[]]$Solutions
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
+    [System.Collections.Generic.Dictionary[string, PackageAudit]]$VulnerablePackages
 
     SolutionAuditPlural([SolutionAudit[]]$solutions) {
         $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
         $this.Solutions = $solutions | Sort-Object -Property SolutionName
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
+        $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
+    }
+
+    hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
+        $distinctPackages = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+        $packages = @($this.Solutions.VulnerablePackages.Values | Where-Object { $_ })
+        if ($packages.Count -eq 0) {
+            return $distinctPackages
+        }
+        foreach ($package in $packages) {
+            if (!$distinctPackages.ContainsKey($package.PackageId)) {
+                $distinctPackages[$package.PackageId] = $package
+            }
+        }
+        return $distinctPackages
     }
 }
 #endregion
@@ -94,12 +112,28 @@ class SolutionAudit {
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
     [ProjectAudit[]]$Projects
     [string]$SolutionPath
+    [System.Collections.Generic.Dictionary[string, PackageAudit]]$VulnerablePackages
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
         $this.SolutionName = $solutionFile.BaseName
         $this.Projects = ($audits + $legacyAudits) | Sort-Object -Property ProjectName
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
+        $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
+    }
+
+    hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
+        $distinctPackages = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+        $packages = @($this.Projects.VulnerablePackages | Where-Object { $_ })
+        if ($packages.Count -eq 0) {
+            return $distinctPackages
+        }
+        foreach ($package in $packages) {
+            if (!$distinctPackages.ContainsKey($package.PackageId)) {
+                $distinctPackages[$package.PackageId] = $package
+            }
+        }
+        return $distinctPackages
     }
 }
 #endregion
@@ -125,18 +159,22 @@ class ProjectAudit {
 
 #region PackageAudit
 class PackageAudit {
+    [string]$PackageId
     [string]$PackageName
     [string]$PackageVersion
     [string]$FirstPatchedVersion
+    [Severity]$HighestSeverity
     [VulnerabilityCount]$VulnerabilityCount
     [Vulnerability[]]$Vulnerabilities
 
     PackageAudit([Package]$package) {
+        $this.PackageId = $package.Id
         $this.PackageName = $package.Name
         $this.PackageVersion = $package.Version
         $this.Vulnerabilities = $package.Vulnerabilities | Sort-Object -Property Severity -Descending
         $this.FirstPatchedVersion = $this.GetPatchedVersion()
         $this.VulnerabilityCount = [VulnerabilityCount]::Create($this.Vulnerabilities)
+        $this.HighestSeverity = $this.VulnerabilityCount.GetHighestSeverity()
     }
 
     hidden [string]GetPatchedVersion() {
@@ -159,6 +197,10 @@ class PackageAudit {
             }
         }
         return $maxPatchedVersion
+    }
+
+    [string]ToString() {
+        return $this.PackageId
     }
 }
 #endregion
@@ -200,6 +242,22 @@ class VulnerabilityCount {
         if ($severityLevel -eq [Severity]::Moderate) { return $this.Moderate + $this.High + $this.Critical }
         if ($severityLevel -eq [Severity]::High) { return $this.High + $this.Critical }
         return $this.Critical
+    }
+
+    [Severity]GetHighestSeverity() {
+        if ($this.Total -eq 0 ) {
+            return [Severity]::None
+        }
+        if ( $this.Critical -gt 0 ) {
+            return [Severity]::Critical
+        }
+        if ($this.High -gt 0) {
+            return [Severity]::High
+        }
+        if ($this.Moderate -gt 0) {
+            return [Severity]::Moderate 
+        }
+        return [Severity]::Low
     }
     
     [string]ToString() {
@@ -659,26 +717,62 @@ class VersionConverter {
 }
 #endregion
 
+#region JsonConverter
+class JsonConverter {
+    static [string]Convert([SolutionAudit]$solutionAudit) {
+        return [JsonConverter]::Convert($solutionAudit, 3, $false)
+    }
+
+    static [string]Convert([SolutionAudit]$solutionAudit, [int]$vulnerablePackagesDepth, [bool]$vulnerablePackagesAsArray) {
+        $nameJson = $solutionAudit.SolutionName | ConvertTo-Json
+        $projectAuditsJson = @($solutionAudit.Projects) | ConvertTo-Json -Depth 2 -WarningAction SilentlyContinue -Compress -AsArray
+        if (!$projectAuditsJson) {
+            $projectAuditsJson = '[]'
+        }
+        if ($vulnerablePackagesAsArray) {
+            $vulnerablePackagesJson = @($solutionAudit.VulnerablePackages.Values) | ConvertTo-Json -Depth $vulnerablePackagesDepth `
+                -WarningAction SilentlyContinue -Compress -EnumsAsStrings
+            if (!$vulnerablePackagesJson) {
+                $vulnerablePackagesJson = '[]'
+            }
+        }
+        else {
+            $vulnerablePackagesJson = @($solutionAudit.VulnerablePackages) | ConvertTo-Json -Depth $vulnerablePackagesDepth `
+                -WarningAction SilentlyContinue -Compress -EnumsAsStrings
+        }
+        $vulnerabilityCountJson = $solutionAudit.VulnerabilityCount | ConvertTo-Json -Compress
+        $pathJson = $solutionAudit.SolutionPath | ConvertTo-Json
+        $json = '{' + '"SolutionName":' + $nameJson + ',"VulnerabilityCount":' + $vulnerabilityCountJson + `
+            ',"Projects":' + $projectAuditsJson + ',"SolutionPath":' + $pathJson + ',"VulnerablePackages":' + `
+            $vulnerablePackagesJson + '}'
+        return $json
+    }
+
+    static [string]Convert([SolutionAuditPlural]$solutionAuditPlural) {
+        $solutionAuditJsons = $solutionAuditPlural.Solutions | ForEach-Object { 
+            [JsonConverter]::Convert($_, 0, $true)
+        }
+        $solutionAuditJsons = '[' + [string]::Join(',', $solutionAuditJsons) + ']'
+        $vulnerablePackagesJson = $solutionAuditPlural.VulnerablePackages | ConvertTo-Json -Depth 3 -WarningAction SilentlyContinue `
+            -Compress -EnumsAsStrings
+        $vulnerabilityCountJson = $solutionAuditPlural.VulnerabilityCount | ConvertTo-Json -Compress
+        $json = '{' + '"Solutions":' + $solutionAuditJsons + ',"VulnerabilityCount":' + $vulnerabilityCountJson + `
+            ',"VulnerablePackages":' + $vulnerablePackagesJson + '}'
+        return $json
+    }
+}
+#endregion
 
 #region MainBlockFunctions
 #region Format-AuditResult
-function Format-AuditResult($AuditResult) {
-  
-    if ($Depth -eq 0) {
-        $Depth = 6
-    }
-
+function Format-AuditResult($AuditResult) { 
     if ($AuditResult -is [System.Collections.ICollection]) {
         $AuditResult = [SolutionAuditPlural]::new($AuditResult)
-        $Depth = 8
     }
 
     if ($Format -eq 'Json') {
-        return $AuditResult | ConvertTo-Json -Depth $Depth -Compress -WarningAction SilentlyContinue
-    }
-    
-    if ($Format -eq 'Xml') {
-        return $AuditResult | ConvertTo-Xml -Depth $Depth -As String -WarningAction SilentlyContinue
+        [JsonConverter]::Convert($AuditResult)
+        return
     }
 
     if ($Format -eq 'Text') {
@@ -831,6 +925,13 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
     
         return $auditor.RunModernSolutionAudit($_, $FindPatchedOnline)
     }
+
+    if ($OnlyProjectsWithVulnerabilities) {
+        foreach ($solutionAudit in $results) {
+            $solutionAudit.Projects = @($solutionAudit.Projects | Where-Object { $_.VulnerabilityCount.Total -gt 0 })
+        }
+    }
+
     return $results
 }
 #endregion
