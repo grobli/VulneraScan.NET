@@ -644,13 +644,14 @@ class VersionConverter {
     hidden static $Cache = [System.Collections.Generic.Dictionary[string, version]]::new()
 
     static [version]Convert([string]$versionString) {
+        $versionString = $versionString.Trim()
         if ([VersionConverter]::Cache.ContainsKey($versionString)) {
             return [VersionConverter]::Cache[$versionString]
         }
         [version]$version = $null
-        $versionString = $versionString.Split('-', 2)[0]
-        if ($versionString) {
-            $version = $versionString
+        $versionStringNoRelease = $versionString.Split('-', 2)[0]
+        if ($versionStringNoRelease) {
+            $version = $versionStringNoRelease
         }
         [VersionConverter]::Cache[$versionString] = $version
         return $version
