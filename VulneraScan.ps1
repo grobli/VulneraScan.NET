@@ -454,7 +454,7 @@ class VulnerabilityAuditor {
     }
 
     hidden static [PSCustomObject]MakeGetRequest([string]$url) {
-        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing -ErrorAction Stop
+        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing -MaximumRetryCount 5 -ErrorAction Stop
     }
 
     hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]FetchNuGetData([string]$indexEntry) {   
