@@ -820,8 +820,8 @@ function Format-ProjectAuditAsText([ProjectAudit]$ProjectAudit) {
 
 #region Format-PackageAuditAsText
 function Format-PackageAuditAsText([PackageAudit]$PackageAudit) {
-    $name = $PackageAudit.PackageName
-    Write-Output "_______ $name ".PadRight(105, '_')
+    $id = $PackageAudit.PackageId
+    Write-Output "_______ $id ".PadRight(105, '_')
     ($PackageAudit | Select-Object -Property PackageVersion, FirstPatchedVersion, VulnerabilityCount | Format-List | Out-String).Trim()
     $PackageAudit.Vulnerabilities | Select-Object -Property AdvisoryUrl, Severity | Format-List
 }
