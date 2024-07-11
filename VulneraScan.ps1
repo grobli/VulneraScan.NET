@@ -329,8 +329,8 @@ class Solution {
         $projs = $content `
         | Where-Object { [Solution]::IsProjectLine($_) -and [Solution]::HasCsprojPath($_) } `
         | ForEach-Object { 
-                ($name, $path) = $_.Split(',')
-                ($path, $guid) = $path.Split('{')
+            ($name, $path) = $_.Split(',')
+            ($path, $guid) = $path.Split('{')
             $path = $path.Replace('"', '').Trim()
             $path = Join-Path -Path $solutionDir -ChildPath $path
             [Project]::new($path, $solutionFile.FullName)
@@ -442,11 +442,12 @@ class Package {
     [Vulnerability[]]$Vulnerabilities
     [string]$Id
 
-    Package([string]$id) {
-            ($n, $v) = $id.ToLower().Split('/')
+    Package([string]$packageId) {
+        $packageId = $packageId.ToLower()
+        ($n, $v) = $packageId.Split('/')
         $this.Name = $n
         $this.Version = [VersionConverter]::Convert($v)
-        $this.Id = $id
+        $this.Id = $packageId
     }
 
     Package([string]$name, [string]$version) {
@@ -475,6 +476,7 @@ class NugetVulnerabilityEntry {
 }
 #endregion
 
+#region ResilientHttpClient
 class ResilientHttpClient {
     static [int]$FirstRetryDelayMillis = 500
     static [int]$MaxRetries = 5
@@ -501,6 +503,7 @@ class ResilientHttpClient {
         return $retry * [math]::Pow(2, $retry)
     }
 }
+#endregion
     
 #region VulnerabilityAuditor
 class VulnerabilityAuditor {
