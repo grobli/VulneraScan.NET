@@ -751,20 +751,24 @@ class JsonConverter {
 
     static [string]Convert([SolutionAudit]$solutionAudit, [int]$vulnerablePackagesDepth, [bool]$vulnerablePackagesAsArray) {
         $nameJson = $solutionAudit.SolutionName | ConvertTo-Json
-        $projectAuditsJson = @($solutionAudit.Projects) | ConvertTo-Json -Depth 2 -WarningAction SilentlyContinue -Compress -AsArray
-        if (!$projectAuditsJson) {
-            $projectAuditsJson = '[]'
+        if ($solutionAudit.Projects.Count -eq 1) {
+            $projectAuditsJson = @($solutionAudit.Projects) | ConvertTo-Json -Depth 1 -WarningAction SilentlyContinue -Compress
+            $projectAuditsJson = '[' + $projectAuditsJson + ']'
+        }
+        else {
+            $projectAuditsJson = @($solutionAudit.Projects) | ConvertTo-Json -Depth 2 -WarningAction SilentlyContinue -Compress
+            if (!$projectAuditsJson) { $projectAuditsJson = '[]' }
         }
         if ($vulnerablePackagesAsArray) {
             $vulnerablePackagesJson = @($solutionAudit.VulnerablePackages.Values) | ConvertTo-Json -Depth $vulnerablePackagesDepth `
-                -WarningAction SilentlyContinue -Compress -EnumsAsStrings
+                -WarningAction SilentlyContinue -Compress 
             if (!$vulnerablePackagesJson) {
                 $vulnerablePackagesJson = '[]'
             }
         }
         else {
             $vulnerablePackagesJson = @($solutionAudit.VulnerablePackages) | ConvertTo-Json -Depth $vulnerablePackagesDepth `
-                -WarningAction SilentlyContinue -Compress -EnumsAsStrings
+                -WarningAction SilentlyContinue -Compress
         }
         $vulnerabilityCountJson = $solutionAudit.VulnerabilityCount | ConvertTo-Json -Compress
         $pathJson = $solutionAudit.SolutionPath | ConvertTo-Json
@@ -780,7 +784,7 @@ class JsonConverter {
         }
         $solutionAuditJsons = '[' + [string]::Join(',', $solutionAuditJsons) + ']'
         $vulnerablePackagesJson = $solutionAuditPlural.VulnerablePackages | ConvertTo-Json -Depth 3 -WarningAction SilentlyContinue `
-            -Compress -EnumsAsStrings
+            -Compress
         $vulnerabilityCountJson = $solutionAuditPlural.VulnerabilityCount | ConvertTo-Json -Compress
         $json = '{' + '"Solutions":' + $solutionAuditJsons + ',"VulnerabilityCount":' + $vulnerabilityCountJson + `
             ',"VulnerablePackages":' + $vulnerablePackagesJson + '}'
