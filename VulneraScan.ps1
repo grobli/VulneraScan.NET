@@ -474,6 +474,33 @@ class NugetVulnerabilityEntry {
     }
 }
 #endregion
+
+class ResilientHttpClient {
+    static [int]$FirstRetryDelayMillis = 500
+    static [int]$MaxRetries = 5
+
+    static [PSCustomObject]Get([string]$url) {
+        $retry = 0
+        while ($retry -lt [ResilientHttpClient]::MaxRetries) {
+            try {
+                return [ResilientHttpClient]::MakeGetRequest($url)
+            }
+            catch {
+                $delay = [ResilientHttpClient]::GetDelay($retry++)
+                Start-Sleep -Milliseconds $delay
+            }
+        }
+        throw "HTTP GET: $url - Failed!"
+    }
+
+    hidden static [PSCustomObject]MakeGetRequest([string]$url) {
+        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing -ErrorAction Stop
+    }
+
+    hidden static [int]GetDelay([int]$retry) {
+        return $retry * [math]::Pow(2, $retry)
+    }
+}
     
 #region VulnerabilityAuditor
 class VulnerabilityAuditor {
@@ -500,7 +527,7 @@ class VulnerabilityAuditor {
             Base   = $null
             Update = $null
         }
-        $response = [VulnerabilityAuditor]::MakeGetRequest($this.NugetVulnerabilityIndexUrl)
+        $response = [ResilientHttpClient]::Get($this.NugetVulnerabilityIndexUrl)
         $response | ForEach-Object {
             if ($_.'@name' -eq 'base') {
                 $index.Base = $_.'@id'
@@ -511,13 +538,9 @@ class VulnerabilityAuditor {
         return $index
     }
 
-    hidden static [PSCustomObject]MakeGetRequest([string]$url) {
-        return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing -MaximumRetryCount 5 -ErrorAction Stop
-    }
-
     hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]FetchNuGetData([string]$indexEntry) {   
         $entriesDict = [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]::new()
-        $response = [VulnerabilityAuditor]::MakeGetRequest($indexEntry)
+        $response = [ResilientHttpClient]::Get($indexEntry)
         $response.PSObject.Properties `
         | Select-Object -Property Name, Value `
         | ForEach-Object {
@@ -618,7 +641,7 @@ class VulnerabilityAuditor {
                 $advisoryData = $this.AdvisoriesCache[$_.GhsaId]
             }
             else {
-                $advisoryData = [VulnerabilityAuditor]::MakeGetRequest($_.AdvisoryUrl.Replace('github', 'api.github'))
+                $advisoryData = [ResilientHttpClient]::Get($_.AdvisoryUrl.Replace('github', 'api.github'))
                 $this.AdvisoriesCache[$_.GhsaId] = $advisoryData
             }
 
