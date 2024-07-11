@@ -81,7 +81,7 @@ class Vulnerability {
 class SolutionAuditPlural {
     [SolutionAudit[]]$Solutions
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
-    [System.Collections.Generic.Dictionary[string, PackageAudit]]$VulnerablePackages
+    [System.Collections.Generic.SortedDictionary[string, PackageAudit]]$VulnerablePackages
 
     SolutionAuditPlural([SolutionAudit[]]$solutions) {
         $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
@@ -90,8 +90,8 @@ class SolutionAuditPlural {
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
     }
 
-    hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
-        $distinctPackages = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+    hidden [System.Collections.Generic.SortedDictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
+        $distinctPackages = [System.Collections.Generic.SortedDictionary[string, PackageAudit]]::new()
         $packages = @($this.Solutions.VulnerablePackages.Values | Where-Object { $_ })
         if ($packages.Count -eq 0) {
             return $distinctPackages
@@ -112,7 +112,7 @@ class SolutionAudit {
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
     [ProjectAudit[]]$Projects
     [string]$SolutionPath
-    [System.Collections.Generic.Dictionary[string, PackageAudit]]$VulnerablePackages
+    [System.Collections.Generic.SortedDictionary[string, PackageAudit]]$VulnerablePackages
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
@@ -122,8 +122,8 @@ class SolutionAudit {
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
     }
 
-    hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
-        $distinctPackages = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+    hidden [System.Collections.Generic.SortedDictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
+        $distinctPackages = [System.Collections.Generic.SortedDictionary[string, PackageAudit]]::new()
         $packages = @($this.Projects.VulnerablePackages | Where-Object { $_ })
         if ($packages.Count -eq 0) {
             return $distinctPackages
