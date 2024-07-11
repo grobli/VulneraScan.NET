@@ -797,8 +797,13 @@ function Format-AuditResult($AuditResult) {
 function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit | Select-Object -Property SolutionName, SolutionPath | Format-Table
     Write-Output 'Vulnerability Count:'
-    $SolutionAudit.VulnerabilityCount | Format-Table
+    $SolutionAudit.VulnerabilityCount | Format-List
     $SolutionAudit.Projects | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
+    Write-Output "======= All Vulnerabilities Details ".PadRight(105, '=')
+    Write-Output ''
+    $SolutionAudit.VulnerablePackages.Values | ForEach-Object {
+        Format-PackageAuditAsText $_
+    }
 }
 #endregion
 
@@ -806,11 +811,9 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
 function Format-ProjectAuditAsText([ProjectAudit]$ProjectAudit) {
     $name = $ProjectAudit.ProjectName
     Write-Output "======= $name ".PadRight(105, '=')
-    ($ProjectAudit | Select-Object -Property VulnerabilityCount, ProjectType, ProjectPath | Format-List | Out-String).TrimStart()
+    ($ProjectAudit | Select-Object -Property VulnerabilityCount, ProjectType, ProjectPath | Format-List | Out-String).Trim()
     if ($ProjectAudit.VulnerablePackages) {
-        $ProjectAudit.VulnerablePackages | ForEach-Object {
-            Format-PackageAuditAsText $_
-        }
+        $ProjectAudit.VulnerablePackages | Select-Object @{Name = 'Vulnerable Packages'; Expression = 'PackageId' } | Format-Table
     }
 }
 #endregion
