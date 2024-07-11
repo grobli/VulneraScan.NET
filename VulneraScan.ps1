@@ -442,18 +442,20 @@ class Package {
     [Vulnerability[]]$Vulnerabilities
     [string]$Id
 
-    Package([string]$packageId) {
+    Package([string]$packageId, [NugetService]$nugetService) {
         $packageId = $packageId.ToLower()
         ($n, $v) = $packageId.Split('/')
         $this.Name = $n
         $this.Version = [VersionConverter]::Convert($v)
         $this.Id = $packageId
+        $this.Vulnerabilities = $nugetService.FindVulnerabilities($this)
     }
 
-    Package([string]$name, [string]$version) {
+    Package([string]$name, [string]$version, [NugetService]$nugetService) {
         $this.Name = $name.ToLower()
         $this.Version = [VersionConverter]::Convert($version)
         $this.Id = $this.Name + '/' + $this.Version.ToString()
+        $this.Vulnerabilities = $nugetService.FindVulnerabilities($this)
     }
 
     [string]ToString() {
@@ -504,27 +506,50 @@ class ResilientHttpClient {
     }
 }
 #endregion
-    
-#region VulnerabilityAuditor
-class VulnerabilityAuditor {
+
+#region NugetService
+class NugetService {
     hidden [string]$NugetVulnerabilityIndexUrl
     hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$Base
     hidden [System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$Update
     hidden [hashtable]$AdvisoriesCache
-    hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]$AuditWithVulnerabilitiesCache
-    hidden [System.Collections.Generic.HashSet[string]]$AuditNoVulnerableSet
 
-    VulnerabilityAuditor() {
+    NugetService() {
         $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
         $this.AdvisoriesCache = @{}
-        $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
-        $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[string]]::new()
 
         $index = $this.FetchNugetIndex()
         $this.Base = $this.FetchNuGetData($index.Base)
         $this.Update = $this.FetchNuGetData($index.Update)
     }
 
+    [Vulnerability[]]FindVulnerabilities([Package]$package) {
+        $vBase = [NugetService]::SearchInVulnerabilityData($this.Base, $package)
+        $vUpdate = [NugetService]::SearchInVulnerabilityData($this.Update, $package)
+        $allVulnerabilities = $($vBase; $vUpdate)
+        if ($allVulnerabilities) { return $allVulnerabilities }
+        return @()
+    }
+
+    [version]FindPatchedVersionOnline([Vulnerability[]]$vulnerabilities) {
+        $patchedVersions = $vulnerabilities | ForEach-Object {
+            if ($this.AdvisoriesCache.ContainsKey($_.GhsaId)) {
+                $advisoryData = $this.AdvisoriesCache[$_.GhsaId]
+            }
+            else {
+                $advisoryData = [ResilientHttpClient]::Get($_.AdvisoryUrl.Replace('github', 'api.github'))
+                $this.AdvisoriesCache[$_.GhsaId] = $advisoryData
+            }
+
+            $advisoryData `
+            | Select-Object -ExpandProperty vulnerabilities `
+            | Where-Object { $_.package.ecosystem -eq 'nuget' } `
+            | Select-Object -ExpandProperty first_patched_version `
+            | ForEach-Object { [VersionConverter]::Convert($_) } `
+        }
+        return ($patchedVersions | Sort-Object -Descending)[0]
+    }
+    
     hidden [PSCustomObject]FetchNugetIndex() {
         $index = [PSCustomObject]@{
             Base   = $null
@@ -553,6 +578,35 @@ class VulnerabilityAuditor {
             $entriesDict[$_.Name] = $entries
         }
         return $entriesDict
+    }
+
+    hidden static [Vulnerability[]]SearchInVulnerabilityData([System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$data, [Package]$package) {
+        if (!$data.ContainsKey($package.Name)) {
+            return @()
+        }
+        $vulnerabilities = $data[$package.Name]  `
+        | ForEach-Object {
+            $vrange = [VersionRange]::Parse($_.versions)
+            [Vulnerability]::new($_.severity, $_.url, $vrange)
+        } `
+        | Where-Object { $_.VersionRange.CheckInRange($package.Version) }
+
+        if ($vulnerabilities) { return $vulnerabilities }
+        return @()
+    }
+}
+#endregion
+    
+#region VulnerabilityAuditor
+class VulnerabilityAuditor {
+    hidden [System.Collections.Generic.Dictionary[string, PackageAudit]]$AuditWithVulnerabilitiesCache
+    hidden [System.Collections.Generic.HashSet[string]]$AuditNoVulnerableSet
+    hidden [NugetService]$NugetService
+
+    VulnerabilityAuditor([NugetService]$nugetService) {
+        $this.NugetService = $nugetService
+        $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[string, PackageAudit]]::new()
+        $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[string]]::new()
     }
 
     [SolutionAudit]RunSolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
@@ -587,7 +641,7 @@ class VulnerabilityAuditor {
             if ($this.AuditNoVulnerableSet.Contains($_)) {
                 return
             }
-            $package = $this.CreatePackage($_)
+            $package = [Package]::new($_, $this.NugetService)
             if ($package.Vulnerabilities.Count -eq 0) {
                 $this.AuditNoVulnerableSet.Add($_) | Out-Null
                 return
@@ -602,59 +656,10 @@ class VulnerabilityAuditor {
     [PackageAudit]CreatePackageAudit([Package]$package, [bool]$findPatchedOnline) {
         $audit = [PackageAudit]::new($package)
         if ($package.Vulnerabilities.Count -gt 0 -and -not $audit.FirstPatchedVersion -and $findPatchedOnline) {
-            $patchedVersion = $this.FindPatchedVersionOnline($package.Vulnerabilities)
+            $patchedVersion = $this.NugetService.FindPatchedVersionOnline($package.Vulnerabilities)
             $audit.FirstPatchedVersion = $patchedVersion
         }
         return $audit
-    }
-
-    hidden [Package]CreatePackage([string]$packageId) {
-        $package = [Package]::new($packageId)
-        $vulnerabilities = $this.FindVulnerabilities($package)
-        $package.Vulnerabilities = $vulnerabilities
-        return $package
-    }
-
-    hidden [Vulnerability[]]FindVulnerabilities([Package]$package) {
-        $vBase = [VulnerabilityAuditor]::SearchInData($this.Base, $package)
-        $vUpdate = [VulnerabilityAuditor]::SearchInData($this.Update, $package)
-        $allVulnerabilities = $($vBase; $vUpdate)
-        if ($allVulnerabilities) { return $allVulnerabilities }
-        return @()
-    }
-    
-    hidden static [Vulnerability[]]SearchInData([System.Collections.Generic.Dictionary[string, NugetVulnerabilityEntry[]]]$data, [Package]$package) {
-        if (!$data.ContainsKey($package.Name)) {
-            return @()
-        }
-        $vulnerabilities = $data[$package.Name]  `
-        | ForEach-Object {
-            $vrange = [VersionRange]::Parse($_.versions)
-            [Vulnerability]::new($_.severity, $_.url, $vrange)
-        } `
-        | Where-Object { $_.VersionRange.CheckInRange($package.Version) }
-
-        if ($vulnerabilities) { return $vulnerabilities }
-        return @()
-    }
-
-    hidden [version]FindPatchedVersionOnline([Vulnerability[]]$vulnerabilities) {
-        $patchedVersions = $vulnerabilities | ForEach-Object {
-            if ($this.AdvisoriesCache.ContainsKey($_.GhsaId)) {
-                $advisoryData = $this.AdvisoriesCache[$_.GhsaId]
-            }
-            else {
-                $advisoryData = [ResilientHttpClient]::Get($_.AdvisoryUrl.Replace('github', 'api.github'))
-                $this.AdvisoriesCache[$_.GhsaId] = $advisoryData
-            }
-
-            $advisoryData `
-            | Select-Object -ExpandProperty vulnerabilities `
-            | Where-Object { $_.package.ecosystem -eq 'nuget' } `
-            | Select-Object -ExpandProperty first_patched_version `
-            | ForEach-Object { [VersionConverter]::Convert($_) } `
-        }
-        return ($patchedVersions | Sort-Object -Descending)[0]
     }
 }
 #endregion
@@ -946,7 +951,8 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
             Invoke-ParallelRestore $Solution
         }
     }
-    $auditor = [VulnerabilityAuditor]::new()
+    $nugetService = [NugetService]::new()
+    $auditor = [VulnerabilityAuditor]::new($nugetService)
     $results = $Solution | ForEach-Object {
         if ($ProjectsToScan -eq 'All') {
             return $auditor.RunSolutionAudit($_, $FindPatchedOnline)
