@@ -183,7 +183,7 @@ class PackageAudit {
         $this.VulnerabilityCount = [VulnerabilityCount]::Create($this.Vulnerabilities)
         $this.HighestSeverity = $this.VulnerabilityCount.GetHighestSeverity()
         $this.DependentPackages = $package.Dependants | ForEach-Object { $_.Id.ToString() }
-        $this.VulnerableDependencies = $package.Dependencies | Where-Object { $_.IsVulnerable() -or $_.HasVulnerableDependencies() }
+        $this.VulnerableDependencies = $package.Dependencies | Where-Object { $_.IsVulnerable() -or $_.HasVulnerableDependencies }
         $this.IsTransitive = $package.IsTransitive()
     }
 
@@ -396,7 +396,7 @@ class Project {
 
         foreach ($node in $nodes) {
             $id = [PackageId]::new($node.id, $node.version)
-            $packageStore.Add($id, @())
+            $packageStore.Add($id)
         }
         return $packageStore.GetAll()
     }
@@ -415,6 +415,7 @@ class Project {
     hidden static [Package[]]ParseProjectAssetsJson([System.IO.FileInfo]$projectAssetsFile, [PackageStore]$packageStore) {
         $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsFile.FullName) 
         $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+       
         $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
         $entries = $targets `
         | Select-Object -Property Name, Value `
@@ -428,7 +429,8 @@ class Project {
                 | ForEach-Object { [PackageId]::new($_.Name, $_.Value) }
             }
             $packageId = [PackageId]::new($entry.Name)
-            $packageStore.Add($packageId, $dependencies)
+            $packageStore.Add($packageId)
+            $packageStore.SetDependencies($packageId, $dependencies)
         }
         return $packageStore.GetAll()
     }
@@ -503,6 +505,7 @@ class Package {
     [Vulnerability[]]$Vulnerabilities = @()
     [Package[]]$Dependencies = @()
     [Package[]]$Dependants = @()
+    [bool]$HasVulnerableDependencies
 
     Package([PackageId]$packageId) {
         $this.Id = $packageId
@@ -514,15 +517,6 @@ class Package {
 
     [bool]IsVulnerable() {
         return $this.Vulnerabilities.Count -gt 0
-    }
-
-    [bool]HasVulnerableDependencies() {
-        foreach ($dep in $this.Dependencies) {
-            if ($dep.IsVulnerable() -or $dep.HasVulnerableDependencies()) {
-                return $true
-            }
-        }
-        return $false
     }
 
     [int]GetHashCode() {
@@ -544,38 +538,70 @@ class Package {
 
 #region PackageStore
 class PackageStore {
-    hidden [System.Collections.Generic.Dictionary[PackageId, Package]]$Store
+    hidden [System.Collections.Generic.Dictionary[string, Package]]$Store
+    hidden [System.Collections.Generic.Dictionary[PackageId, PackageId[]]]$DependencyMapping
+
     hidden [NugetService]$NugetService
         
     PackageStore([NugetService]$nugetService) {
-        $this.Store = [System.Collections.Generic.Dictionary[PackageId, Package]]::new()
+        $this.Store = [System.Collections.Generic.Dictionary[string, Package]]::new()
+        $this.DependencyMapping = [System.Collections.Generic.Dictionary[PackageId, PackageId[]]]::new()
         $this.NugetService = $nugetService
     }
 
-    [void]Add([PackageId]$packageId, [PackageId[]]$dependencyIds) {   
-        if (!$this.Store.ContainsKey($packageId)) {
-            $package = $this.CreatePackage($packageId)
-            $this.Store[$packageId] = $package
+    [void]Add([PackageId]$packageId) {
+        $package = [Package]::new($packageId)
+        $this.Store[$packageId.Name] = $package
+    }
+
+    [void]SetDependencies([PackageId]$packageId, [PackageId[]]$dependencyIds) {
+        $this.DependencyMapping[$packageId] = $dependencyIds
+    }
+
+    [Package[]]GetAll() {
+        $packages = $this.Store.Values
+        foreach ($package in $packages) {
+            $this.SetupDependencies($package)
         }
-        $package = $this.Store[$packageId]
+        foreach ($package in $packages) {
+            $this.FindVulnerabilities($package)
+        }
+        $this.PropagateVulnerableDependenciesFlag()
+        return $packages
+    }
+
+    hidden [void]SetupDependencies([Package]$package) {
+        $dependencyIds = $this.DependencyMapping[$package.Id]
         foreach ($depId in $dependencyIds) {
-            if (!$this.Store.ContainsKey($depId)) {
-                $this.Store[$depId] = $this.CreatePackage($depId)
-            }
-            $dep = $this.Store[$depId]
+            $dep = $this.Store[$depId.Name]
             $package.Dependencies += $dep
             $dep.Dependants += $package
         }
     }
 
-    [Package[]]GetAll() {
-        return $this.Store.Values
+    hidden [void]PropagateVulnerableDependenciesFlag() {
+        [Package[]]$packagesWithVulnerableDeps = $this.Store.Values | Where-Object { $_.HasVulnerableDependencies }
+        $newCount = $packagesWithVulnerableDeps.Count
+        $prevCount = 0
+        while ($newCount -ne $prevCount) {
+            foreach ($package in $packagesWithVulnerableDeps) {
+                foreach ($dependant in $package.Dependants) {
+                    $dependant.HasVulnerableDependencies = $true
+                }
+            }
+            $packagesWithVulnerableDeps = $this.Store.Values | Where-Object { $_.HasVulnerableDependencies }
+            $prevCount = $newCount
+            $newCount = $packagesWithVulnerableDeps.Count
+        }
     }
 
-    hidden [Package]CreatePackage([PackageId]$packageId) {
-        $package = [Package]::new($packageId)
+    hidden [void]FindVulnerabilities([Package]$package) {
         $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
-        return $package
+        if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
+            foreach ($dependant in $package.Dependants) {
+                $dependant.HasVulnerableDependencies = $true
+            }
+        }
     }
 }
 #endregion
@@ -761,7 +787,7 @@ class VulnerabilityAuditor {
                 $audits += $this.AuditWithVulnerabilitiesCache[$package.Id]
                 continue
             }
-            if (!$package.IsVulnerable() -and !$package.HasVulnerableDependencies()) {
+            if (!$package.IsVulnerable() -and !$package.HasVulnerableDependencies) {
                 $this.AuditNoVulnerableSet.Add($package.Id) 
                 continue
             }
