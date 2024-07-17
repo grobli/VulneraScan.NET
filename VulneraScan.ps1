@@ -1063,12 +1063,14 @@ function Format-AuditResult($AuditResult) {
     if ($Format -eq 'Text') {
         if ($AuditResult -is [SolutionAuditPlural]) {
             $AuditResult | Select-Object -ExpandProperty Solutions | ForEach-Object {
+                if (!$_.Projects) { return }
                 Format-SolutionAuditAsText -SolutionAudit $_
                 Write-Output "`n".PadRight(106, '#')
             }
             return
         }
         else {
+            if (!$AuditResult.Projects) { return }
             Format-SolutionAuditAsText -SolutionAudit $AuditResult
             return
         }
@@ -1086,7 +1088,7 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit.Projects | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
     Write-Output "======= All Vulnerabilities Details ".PadRight(105, '=')
     Write-Output ''
-    $SolutionAudit.VulnerablePackages.Values | ForEach-Object {
+    $SolutionAudit.VulnerablePackages | ForEach-Object {
         Format-PackageAuditAsText $_
     }
 }
@@ -1204,7 +1206,7 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
     $nugetService = [NugetService]::new()
     $advisoryService = [AdvisoryService]::new()
     $auditor = [VulnerabilityAuditor]::new($nugetService, $advisoryService)
-    
+
     $auditor.Settings.FindPatchedOnline = $FindPatchedOnline
     $auditor.Settings.IncludeDependencies = !$Minimal
     $auditor.Settings.ScanMode = $ProjectsToScan
