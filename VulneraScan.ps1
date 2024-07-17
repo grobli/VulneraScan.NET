@@ -195,13 +195,12 @@ class PackageAudit {
     }
 
     hidden [string]GetPatchedVersion() {
-        $versions = $this.Vulnerabilities `
-        | Where-Object { !$_.VersionRange.IsMaxInclusive } `
-        | ForEach-Object {
-            $_.VersionRange.Max
+        [version[]]$versions = @()
+        foreach ($vln in @($this.Vulnerabilities | Where-Object { !$_.VersionRange.IsMaxInclusive })) {
+            $versions += $vln.VersionRange.Max
         }
-        if (!$versions) {
-            return $null
+        if (!$versions) { 
+            return $null 
         }
         $maxPatchedVersion = ($versions | Sort-Object -Descending)[0]
         # check if there is any uncertain version that is higher than inferred max patched version from Version Ranges
@@ -241,12 +240,12 @@ class VulnerabilityCount {
     
     static[VulnerabilityCount]SumCounts([VulnerabilityCount[]]$counts) {
         $count = [VulnerabilityCount]::new()
-        $counts | ForEach-Object {
-            $count.Total += $_.Total
-            $count.Low += $_.Low
-            $count.Moderate += $_.Moderate
-            $count.High += $_.High
-            $count.Critical += $_.Critical
+        foreach ($c in $counts) {
+            $count.Total += $c.Total
+            $count.Low += $c.Low
+            $count.Moderate += $c.Moderate
+            $count.High += $c.High
+            $count.Critical += $c.Critical
         }
         return $count
     }
@@ -441,10 +440,13 @@ class Project {
     }
 
     hidden [PackageId[]]ParsePackagesConfig() {
-        $ids = [xml]([System.IO.File]::ReadAllText($this.PackagesConfigFile.FullName)) `
+        [PackageId[]]$ids = @()
+        $nodes = [xml]([System.IO.File]::ReadAllText($this.PackagesConfigFile.FullName)) `
         | Select-Xml -XPath './/package' `
-        | Select-Object -ExpandProperty Node `
-        | ForEach-Object { [PackageId]::Create($_.id, $_.version) }
+        | Select-Object -ExpandProperty Node
+        foreach ($node in $nodes) {
+            $ids += [PackageId]::Create($node.id, $node.version)
+        }
         return $ids
     }
 
@@ -464,9 +466,11 @@ class Project {
             $packageId = [PackageId]::Create($entry.Name)
             $packageStore.Add($packageId)
             if ($entry.Value.dependencies) {
-                $dependencies = $entry.Value.dependencies.PSObject.Properties `
-                | Select-Object -Property Name, Value `
-                | ForEach-Object { [PackageId]::Create($_.Name, $_.Value) }
+                [PackageId[]]$dependencies = @()
+                $dependencyEntries = $entry.Value.dependencies.PSObject.Properties | Select-Object -Property Name, Value
+                foreach ($depEntry in $dependencyEntries) {
+                    $dependencies += [PackageId]::Create($depEntry.Name, $depEntry.Value)
+                }
                 $packageStore.SetDependencies($packageId, $dependencies)
             }
         }
@@ -757,18 +761,18 @@ class NugetService {
     }
 
     hidden [System.Collections.Generic.Dictionary[string, Vulnerability[]]]FetchVulnerabilityData([string]$indexEntry) {   
-        $entriesDict = [System.Collections.Generic.Dictionary[string, Vulnerability[]]]::new()
+        $vulnerabilitiesDict = [System.Collections.Generic.Dictionary[string, Vulnerability[]]]::new()
         $response = [ResilientHttpClient]::Get($indexEntry)
-        $response.PSObject.Properties `
-        | Select-Object -Property Name, Value `
-        | ForEach-Object {
-            $entries = $_.Value | ForEach-Object {
-                $vrange = [VersionRange]::Parse($_.versions)
-                [Vulnerability]::new($_.severity, $_.url, $vrange)
+        $properties = $response.PSObject.Properties | Select-Object -Property Name, Value
+        foreach ($p in $properties) {
+            [Vulnerability[]]$vulnerabilities = @()
+            foreach ($entry in $p.Value) {
+                $vrange = [VersionRange]::Parse($entry.versions)
+                $vulnerabilities += [Vulnerability]::new($entry.severity, $entry.url, $vrange)
             }
-            $entriesDict[$_.Name] = $entries
+            $vulnerabilitiesDict[$p.Name] = $vulnerabilities
         }
-        return $entriesDict
+        return $vulnerabilitiesDict
     }
 
     hidden static [Vulnerability[]]SearchInVulnerabilityData([System.Collections.Generic.Dictionary[string, Vulnerability[]]]$data, [PackageId]$package) {
@@ -1088,9 +1092,7 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit.Projects | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
     Write-Output "======= All Vulnerabilities Details ".PadRight(105, '=')
     Write-Output ''
-    $SolutionAudit.VulnerablePackages | ForEach-Object {
-        Format-PackageAuditAsText $_
-    }
+    $SolutionAudit.VulnerablePackages | ForEach-Object { Format-PackageAuditAsText $_ }
 }
 #endregion
 
@@ -1119,14 +1121,12 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
     $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
     $jobCount = if ($RestoreMaxParallelism -le 0) { $cpuCount } else { [math]::Min($cpuCount, $RestoreMaxParallelism) }
     $i = 0
-    $batches = $Solutions `
-    | ForEach-Object {
+    $batches = $Solutions | ForEach-Object {
         [PSCustomObject]@{
             Solution = $_.File.FullName
             BatchId  = $i++ % $jobCount
-        } `
-    } `
-    | Group-Object -Property BatchId
+        }
+    } | Group-Object -Property BatchId
 
     $scriptBlock = {
         $ErrorActionPreference = $using:ErrorActionPreference
@@ -1191,10 +1191,11 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
 function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
     if ($Restore) {
         if ($RestoreActionPreference -eq 'OnDemand') {
-            $solutionsToRestore = $Solution | ForEach-Object {
+            [Solution[]]$solutionsToRestore = @()
+            foreach ($sln in $Solution) {
                 $projectsToBeRestored = @($_.ModernProjects | Where-Object { $null -eq $_.GetProjectAssetsJsonFile($false) })
                 if ($projectsToBeRestored) {
-                    return $_
+                    $solutionsToRestore += $sln
                 }
             }
             Invoke-ParallelRestore $solutionsToRestore
