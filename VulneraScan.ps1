@@ -781,6 +781,22 @@ class NugetService {
     }
 }
 #endregion
+
+#region VulnerabilityAuditorSettings
+enum ProjectScanMode {
+    All
+    Modern
+    Legacy
+}
+
+class VulnerabilityAuditorSettings {
+    [bool]$FindPatchedOnline = $false
+    [bool]$IncludeDependencies = $true
+    [ProjectScanMode]$ScanMode = [ProjectScanMode]::All
+
+    VulnerabilityAuditorSettings() {}
+}
+#endregion
     
 #region VulnerabilityAuditor
 class VulnerabilityAuditor {
@@ -789,29 +805,43 @@ class VulnerabilityAuditor {
     hidden [System.Collections.Generic.Dictionary[PackageId, PackageAudit]]$AuditWithVulnerabilitiesCache
     hidden [System.Collections.Generic.HashSet[PackageId]]$AuditNoVulnerableSet
 
+    [VulnerabilityAuditorSettings]$Settings
+
     VulnerabilityAuditor([NugetService]$nugetService, [AdvisoryService]$advisoryService) {
         $this.NugetService = $nugetService
         $this.AdvisoryService = $advisoryService
         $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[PackageId, PackageAudit]]::new()
         $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[PackageId]]::new()
+        $this.Settings = [VulnerabilityAuditorSettings]::new()
     }
 
-    [SolutionAudit]RunSolutionAudit([Solution]$solution, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+    [SolutionAudit]RunSolutionAudit([Solution]$solution) {
+        $scanMode = $this.Settings.ScanMode
+        if ($scanMode -eq [ProjectScanMode]::All) {
+            return $this.RunAllSolutionAudit($solution)
+        }
+        if ($scanMode -eq [ProjectScanMode]::Modern) {
+            return $this.RunModernSolutionAudit($solution)
+        }
+        return $this.RunLegacySolutionAudit($solution)
+    }
+
+    hidden [SolutionAudit]RunAllSolutionAudit([Solution]$solution) {
         [ProjectAudit[]]$legacyAudits = @()
         foreach ($project in $solution.LegacyProjects) {
-            $legacyAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies) 
+            $legacyAudits += $this.RunProjectAudit($project) 
         }
         [ProjectAudit[]]$modernAudits = @()
         foreach ($project in $solution.ModernProjects) {
-            $modernAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies)
+            $modernAudits += $this.RunProjectAudit($project)
         }
         return [SolutionAudit]::new($solution.File, $legacyAudits, $modernAudits)
     }
 
-    [SolutionAudit]RunModernSolutionAudit([Solution]$solution, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+    hidden [SolutionAudit]RunModernSolutionAudit([Solution]$solution) {
         [ProjectAudit[]]$modernAudits = @()
         foreach ($project in $solution.ModernProjects) {
-            $modernAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies)
+            $modernAudits += $this.RunProjectAudit($project)
         }
         $solution.LegacyProjects | ForEach-Object {
             Write-Warning -Message "ProjectsToScan='Modern' - Ignoring legacy project: $_"
@@ -819,10 +849,10 @@ class VulnerabilityAuditor {
         return [SolutionAudit]::new($solution.File, @(), $modernAudits)
     }
 
-    [SolutionAudit]RunLegacySolutionAudit([Solution]$solution, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+    hidden [SolutionAudit]RunLegacySolutionAudit([Solution]$solution) {
         [ProjectAudit[]]$legacyAudits = @()
         foreach ($project in $solution.LegacyProjects) {
-            $legacyAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies) 
+            $legacyAudits += $this.RunProjectAudit($project) 
         }
         $solution.ModernProjects | ForEach-Object {
             Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring modern project: $_"
@@ -830,22 +860,22 @@ class VulnerabilityAuditor {
         return [SolutionAudit]::new($solution.File, $legacyAudits, @())
     }
 
-    hidden [ProjectAudit]RunProjectAudit([Project]$project, [bool]$findPatchedOnline, [bool]$includeDependencies) {
-        if ($includeDependencies) {
+    hidden [ProjectAudit]RunProjectAudit([Project]$project) {
+        if ($this.Settings.IncludeDependencies) {
             [Package[]]$packages = $project.GetPackages($this.NugetService)
             [PackageAudit[]]$audits = @()
             foreach ($package in $packages) {
                 if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
-                    $audit = $this.CreatePackageAudit($package, $findPatchedOnline)
+                    $audit = $this.CreatePackageAudit($package)
                     $audits += $audit
                 }
             }
             return [ProjectAudit]::new($project, $audits)
         }
-        return $this.RunProjectAuditNoDeps($project, $findPatchedOnline)
+        return $this.RunProjectAuditNoDeps($project)
     }
 
-    hidden [ProjectAudit]RunProjectAuditNoDeps([Project]$project, [bool]$findPatchedOnline) {
+    hidden [ProjectAudit]RunProjectAuditNoDeps([Project]$project) {
         [Package[]]$packages = $project.GetPackages()
         [PackageAudit[]]$audits = @()
         foreach ($package in $packages) {
@@ -858,7 +888,7 @@ class VulnerabilityAuditor {
             }
             $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
             if ($package.IsVulnerable()) {
-                $audit = $this.CreatePackageAudit($package, $findPatchedOnline)
+                $audit = $this.CreatePackageAudit($package)
                 $this.AuditWithVulnerabilitiesCache[$package.Id] = $audit
                 $audits += $audit
             }
@@ -870,9 +900,9 @@ class VulnerabilityAuditor {
 
     }
 
-    [PackageAudit]CreatePackageAudit([Package]$package, [bool]$findPatchedOnline) {
+    [PackageAudit]CreatePackageAudit([Package]$package) {
         $audit = [PackageAudit]::new($package)
-        if ($package.Vulnerabilities.Count -gt 0 -and -not $audit.FirstPatchedVersion -and $findPatchedOnline) {
+        if ($this.Settings.FindPatchedOnline -and $package.IsVulnerable() -and -not $audit.FirstPatchedVersion) {
             $patchedVersion = $this.AdvisoryService.FindPatchedVersion($package)
             $audit.FirstPatchedVersion = $patchedVersion
         }
@@ -1174,15 +1204,12 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
     $nugetService = [NugetService]::new()
     $advisoryService = [AdvisoryService]::new()
     $auditor = [VulnerabilityAuditor]::new($nugetService, $advisoryService)
-    $results = $Solution | ForEach-Object {
-        if ($ProjectsToScan -eq 'All') {
-            return $auditor.RunSolutionAudit($_, $FindPatchedOnline, !$Minimal)
-        } 
-        if ($ProjectsToScan -eq 'Legacy') {
-            return $auditor.RunLegacySolutionAudit($_, $FindPatchedOnline, !$Minimal)
-        }
-        return $auditor.RunModernSolutionAudit($_, $FindPatchedOnline, !$Minimal)
-    }
+    
+    $auditor.Settings.FindPatchedOnline = $FindPatchedOnline
+    $auditor.Settings.IncludeDependencies = !$Minimal
+    $auditor.Settings.ScanMode = $ProjectsToScan
+
+    $results = $Solution | ForEach-Object { $auditor.RunSolutionAudit($_) }
 
     if ($OnlyProjectsWithVulnerabilities) {
         foreach ($solutionAudit in $results) {
