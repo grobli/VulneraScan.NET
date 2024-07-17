@@ -81,29 +81,27 @@ class Vulnerability {
 class SolutionAuditPlural {
     [SolutionAudit[]]$Solutions
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
-    [System.Collections.Generic.SortedDictionary[string, PackageAudit]]$VulnerablePackages
-    [PackageAudit[]]$VulnerableDirectPackages
+    [PackageAudit[]]$VulnerablePackages
 
     SolutionAuditPlural([SolutionAudit[]]$solutions) {
         $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
         $this.Solutions = $solutions | Sort-Object -Property SolutionName
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
-        $this.VulnerableDirectPackages = $this.VulnerablePackages.Values | Where-Object { !$_.IsTransitive }
     }
 
-    hidden [System.Collections.Generic.SortedDictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
-        $distinctPackages = [System.Collections.Generic.SortedDictionary[string, PackageAudit]]::new()
-        $packages = @($this.Solutions.VulnerablePackages.Values | Where-Object { $_ })
+    hidden [PackageAudit[]]FindUniqueVulnerablePackages() {
+        $packages = @($this.Solutions.VulnerablePackages | Where-Object { $_ })
         if ($packages.Count -eq 0) {
-            return $distinctPackages
+            return @()
         }
+        $distinctPackages = [System.Collections.Generic.SortedDictionary[string, PackageAudit]]::new()
         foreach ($package in $packages) {
             if (!$distinctPackages.ContainsKey($package.PackageId)) {
                 $distinctPackages[$package.PackageId] = $package
             }
         }
-        return $distinctPackages
+        return $distinctPackages.Values
     }
 }
 #endregion
@@ -114,8 +112,7 @@ class SolutionAudit {
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
     [ProjectAudit[]]$Projects
     [string]$SolutionPath
-    [System.Collections.Generic.SortedDictionary[string, PackageAudit]]$VulnerablePackages
-    [PackageAudit[]]$VulnerableDirectPackages
+    [PackageAudit[]]$VulnerablePackages
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
@@ -123,21 +120,20 @@ class SolutionAudit {
         $this.Projects = ($audits + $legacyAudits) | Sort-Object -Property ProjectName
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
-        $this.VulnerableDirectPackages = $this.VulnerablePackages.Values | Where-Object { !$_.IsTransitive }
     }
 
-    hidden [System.Collections.Generic.SortedDictionary[string, PackageAudit]]FindUniqueVulnerablePackages() {
-        $distinctPackages = [System.Collections.Generic.SortedDictionary[string, PackageAudit]]::new()
+    hidden [PackageAudit[]]FindUniqueVulnerablePackages() {
         $packages = @($this.Projects.VulnerablePackages | Where-Object { $_ })
         if ($packages.Count -eq 0) {
-            return $distinctPackages
+            return @()
         }
+        $distinctPackages = [System.Collections.Generic.SortedDictionary[string, PackageAudit]]::new()
         foreach ($package in $packages) {
             if (!$distinctPackages.ContainsKey($package.PackageId)) {
                 $distinctPackages[$package.PackageId] = $package
             }
         }
-        return $distinctPackages
+        return $distinctPackages.Values
     }
 }
 #endregion
@@ -147,6 +143,8 @@ class ProjectAudit {
     [string]$ProjectName
     [VulnerabilityCount]$VulnerabilityCount
     [PackageAudit[]]$VulnerablePackages
+    [PackageAudit[]]$PackagesWithVulnerableDependencies
+    [PackageAudit[]]$VulnerableDirectPackages
     [string]$ProjectPath
     [string]$ProjectType
     
@@ -154,7 +152,15 @@ class ProjectAudit {
         $this.ProjectName = $project.File.BaseName
         $this.ProjectPath = $project.File.FullName
         $this.ProjectType = if ($project.IsLegacy) { 'Legacy' } else { 'Modern' }
-        $this.VulnerablePackages = $audits | Sort-Object -Property PackageName
+        $this.VulnerablePackages = $audits `
+        | Where-Object { $_.VulnerabilityCount.Total -gt 0 } `
+        | Sort-Object -Property PackageName
+        $this.PackagesWithVulnerableDependencies = $audits `
+        | Where-Object { $_.VulnerableDependencies.Count -gt 0 } `
+        | Sort-Object -Property PackageName 
+        $this.VulnerableDirectPackages = $audits `
+        | Where-Object { !$_.IsTransitive } `
+        | Sort-Object -Property PackageName
         $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
     }
@@ -373,70 +379,13 @@ class Project {
         $this.File = $projectPath
         $this.Solution = $solutionPath
         $this.PackagesConfigFile = $this.GetPackagesConfig()
-        $this.IsLegacy = $null -ne $this.PackagesConfigFile
-    }
-
-    [bool]HasPackageReferences() {
-        $packageReferences = [xml]([System.IO.File]::ReadAllLines($this.File.FullName)) `
-        | Select-Xml -XPath './/PackageReference' -ErrorAction SilentlyContinue `
-        | Select-Object -ExpandProperty Node
-        return $null -ne $packageReferences
+        $this.IsLegacy = !$this.IsSdkStyle()
     }
 
     [Package[]]GetPackages([NugetService]$nugetService) {
         $packageStore = [PackageStore]::new($nugetService)
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } else { $this.ReadProjectAssetsJson($packageStore) }
         return $packages
-    }
-  
-    hidden [Package[]]ReadPackagesConfig([PackageStore]$packageStore) {
-        $nodes = [xml]([System.IO.File]::ReadAllText($this.PackagesConfigFile.FullName)) `
-        | Select-Xml -XPath './/package' `
-        | Select-Object -ExpandProperty Node
-
-        foreach ($node in $nodes) {
-            $id = [PackageId]::new($node.id, $node.version)
-            $packageStore.Add($id)
-        }
-        return $packageStore.GetAll()
-    }
-
-    hidden [Package[]]ReadProjectAssetsJson([PackageStore]$packageStore) {
-        if (!$this.HasPackageReferences()) {
-            return @()
-        }
-        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile($true)
-        if (!$projectAssetsJsonFile) {
-            return @()
-        }
-        return [Project]::ParseProjectAssetsJson($projectAssetsJsonFile, $packageStore)
-    }
-
-    hidden static [Package[]]ParseProjectAssetsJson([System.IO.FileInfo]$projectAssetsFile, [PackageStore]$packageStore) {
-        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsFile.FullName) 
-        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-       
-        $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
-        $entries = $targets `
-        | Select-Object -Property Name, Value `
-        | Where-Object { $_.Value.type -eq 'package' }
-
-        foreach ($entry in $entries) {
-            $dependencies = @()
-            if ($entry.Value.dependencies) {
-                $dependencies = $entry.Value.dependencies.PSObject.Properties `
-                | Select-Object -Property Name, Value `
-                | ForEach-Object { [PackageId]::new($_.Name, $_.Value) }
-            }
-            $packageId = [PackageId]::new($entry.Name)
-            $packageStore.Add($packageId)
-            $packageStore.SetDependencies($packageId, $dependencies)
-        }
-        return $packageStore.GetAll()
-    }
-
-    hidden [System.IO.FileInfo]GetPackagesConfig() {
-        return Get-ChildItem -Path $this.File.Directory.FullName -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
     }
 
     [System.IO.FileInfo]GetProjectAssetsJsonFile([bool]$failOnNotFound) {
@@ -455,6 +404,62 @@ class Project {
     [string]ToString() {
         return $this.File.FullName
     }
+
+    hidden [bool]IsSdkStyle() {
+        $projectNode = [xml]([System.IO.File]::ReadAllText($this.File.FullName)) `
+        | Select-Xml -XPath './Project' -ErrorAction SilentlyContinue `
+        | Select-Object -ExpandProperty Node
+        $sdkAttribute = $projectNode.Attributes | Where-Object { $_.Name -eq 'Sdk' }
+        return $null -ne $sdkAttribute
+    }
+  
+    hidden [Package[]]ReadPackagesConfig([PackageStore]$packageStore) {
+        if (!$this.PackagesConfigFile) {
+            return @()
+        }
+
+        $nodes = [xml]([System.IO.File]::ReadAllText($this.PackagesConfigFile.FullName)) `
+        | Select-Xml -XPath './/package' `
+        | Select-Object -ExpandProperty Node
+
+        foreach ($node in $nodes) {
+            $id = [PackageId]::Create($node.id, $node.version)
+            $packageStore.Add($id)
+        }
+        return $packageStore.GetAll()
+    }
+
+    hidden [Package[]]ReadProjectAssetsJson([PackageStore]$packageStore) {
+        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile($true)
+        return [Project]::ParseProjectAssetsJson($projectAssetsJsonFile, $packageStore)
+    }
+
+    hidden static [Package[]]ParseProjectAssetsJson([System.IO.FileInfo]$projectAssetsFile, [PackageStore]$packageStore) {
+        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsFile.FullName) 
+        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+       
+        $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
+        $entries = $targets `
+        | Select-Object -Property Name, Value `
+        | Where-Object { $_.Value.type -eq 'package' }
+
+        foreach ($entry in $entries) {
+            $dependencies = @()
+            if ($entry.Value.dependencies) {
+                $dependencies = $entry.Value.dependencies.PSObject.Properties `
+                | Select-Object -Property Name, Value `
+                | ForEach-Object { [PackageId]::Create($_.Name, $_.Value) }
+            }
+            $packageId = [PackageId]::Create($entry.Name)
+            $packageStore.Add($packageId)
+            $packageStore.SetDependencies($packageId, $dependencies)
+        }
+        return $packageStore.GetAll()
+    }
+
+    hidden [System.IO.FileInfo]GetPackagesConfig() {
+        return Get-ChildItem -Path $this.File.Directory.FullName -Filter 'packages.config' -ErrorAction SilentlyContinue -Force
+    }
 }
 #endregion
 
@@ -464,18 +469,30 @@ class PackageId {
     [version]$Version
     hidden [string]$Value
 
-    PackageId([string]$packageIdString) {
+    hidden static [System.Collections.Generic.Dictionary[string, PackageId]]$Cache = `
+        [System.Collections.Generic.Dictionary[string, PackageId]]::new()
+
+    static [PackageId]Create([string]$packageIdString) {
         $packageIdString = $packageIdString.Trim().ToLower()
+        if ([PackageId]::Cache.ContainsKey($packageIdString)) {
+            return [PackageId]::Cache[$packageIdString]
+        }
+
+        $packageId = [PackageId]::new($packageIdString)
+        [PackageId]::Cache[$packageIdString] = $packageId
+        return $packageId
+    }
+
+    static [PackageId]Create([string]$name, [string]$version) {
+        $packageIdString = $name + '/' + $version
+        return [PackageId]::Create($packageIdString)
+    }
+
+    hidden PackageId([string]$packageIdString) {
         ($n, $v) = $packageIdString.Split('/')
         $this.Name = $n
         $this.Version = [VersionConverter]::Convert($v)
-        $this.CreateId()
-    }
-
-    PackageId([string]$name, [string]$version) {
-        $this.Name = $name.Trim().ToLower()
-        $this.Version = [VersionConverter]::Convert($version)
-        $this.CreateId()
+        $this.Value = $this.Name + '/' + $this.Version.ToString()
     }
 
     [int]GetHashCode() {
@@ -487,10 +504,6 @@ class PackageId {
             return $this.Value -eq ([PackageId]$obj).Value
         }
         return $false
-    }
-
-    hidden [void]CreateId() {
-        $this.Value = $this.Name + '/' + $this.Version.ToString()
     }
 
     [string]ToString() {
@@ -741,16 +754,12 @@ class NugetService {
     
 #region VulnerabilityAuditor
 class VulnerabilityAuditor {
-    hidden [System.Collections.Generic.Dictionary[PackageId, PackageAudit]]$AuditWithVulnerabilitiesCache
-    hidden [System.Collections.Generic.HashSet[PackageId]]$AuditNoVulnerableSet
     hidden [NugetService]$NugetService
     hidden [AdvisoryService]$AdvisoryService
 
     VulnerabilityAuditor([NugetService]$nugetService, [AdvisoryService]$advisoryService) {
         $this.NugetService = $nugetService
         $this.AdvisoryService = $advisoryService
-        $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[PackageId, PackageAudit]]::new()
-        $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[PackageId]]::new()
     }
 
     [SolutionAudit]RunSolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
@@ -778,22 +787,11 @@ class VulnerabilityAuditor {
     hidden [ProjectAudit]RunProjectAudit([Project]$project, [bool]$findPatchedOnline) {
         [Package[]]$packages = $project.GetPackages($this.NugetService)
         [PackageAudit[]]$audits = @()
-
         foreach ($package in $packages) {
-            if ($this.AuditNoVulnerableSet.Contains($package.Id)) {
-                continue
+            if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
+                $audit = $this.CreatePackageAudit($package, $findPatchedOnline)
+                $audits += $audit
             }
-            if ($this.AuditWithVulnerabilitiesCache.ContainsKey($package.Id)) {
-                $audits += $this.AuditWithVulnerabilitiesCache[$package.Id]
-                continue
-            }
-            if (!$package.IsVulnerable() -and !$package.HasVulnerableDependencies) {
-                $this.AuditNoVulnerableSet.Add($package.Id) 
-                continue
-            }
-            $audit = $this.CreatePackageAudit($package, $findPatchedOnline)
-            $this.AuditWithVulnerabilitiesCache[$package.Id] = $audit
-            $audits += $audit
         }
         return [ProjectAudit]::new($project, $audits)
     }
