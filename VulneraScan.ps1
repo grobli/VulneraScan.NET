@@ -47,6 +47,35 @@ if ($Restore) {
     }
 }
 #endregion
+
+#region Exceptions
+class RecurseNotEnabledException : System.Exception {
+    RecurseNotEnabledException([string]$message) : base($message) {}
+}
+
+class NoSolutionFoundException : System.Exception {
+    NoSolutionFoundException() : base('No solution file found in the provided directory and its subdirectories.') {}
+}
+
+class InvalidFileExtensionException : System.Exception {
+    InvalidFileExtensionException([string]$extension) : base("Provided file is not solution file. " + `
+            "Invalid file extension - expected: '.sln' but received: '$extension'") {}
+}
+
+class PathDoesNotExistException : System.Exception {
+    PathDoesNotExistException([string]$path) : base("Provided path does not exist: $SolutionPath") {}
+}
+
+class ProjectNotRestoredException : System.Exception {
+    ProjectNotRestoredException([string]$projectName) : base("'project.assets.json' file for project: '$projectName' not found! " + `
+            "Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' " + `
+            "on the project's solution before running this script.") {}
+}
+
+class ResilientHttpClientException : System.Exception {
+    ResilientHttpClientException([string]$message) : base($message) {}
+}
+#endregion
     
 #region DataClasses
 enum Severity {
@@ -392,16 +421,13 @@ class Project {
         return $packages
     }
 
-    [System.IO.FileInfo]GetProjectAssetsJsonFile([bool]$failOnNotFound) {
+    [System.IO.FileInfo]GetProjectAssetsJsonFile() {
         $path = Join-Path -Path $this.File.Directory.FullName -ChildPath 'obj\project.assets.json'
         try {
             return Get-Item -Path $path -ErrorAction Stop -Force
         }
         catch {
-            if ($failOnNotFound) {
-                throw "project.assets.json for project: '$this' not found! Use '-Restore' switch to automatically restore project or run manually 'nuget restore' or 'dotnet restore' on the project's solution before running this script."
-            }
-            return $null
+            throw [ProjectNotRestoredException]::new($this.ToString())
         }
     }
 
@@ -478,7 +504,7 @@ class Project {
     }
 
     hidden [PSCustomObject[]]ParseProjectAssetsJson() {
-        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile($true)
+        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
         $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
         $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
         $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
@@ -671,7 +697,7 @@ class ResilientHttpClient {
                 Start-Sleep -Milliseconds $delay
             }
         }
-        throw "HTTP GET: $url - Failed after $maxRetryCount retries"
+        throw  [ResilientHttpClientException]::new("HTTP GET: $url - Failed after $maxRetryCount retries")
     }
 
     hidden static [PSCustomObject]MakeGetRequest([uri]$url) {
@@ -1187,22 +1213,28 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
 }
 #endregion
 
+#region Test-SolutionRequiresRestore
+function Test-SolutionRequiresRestore([Solution]$Solution) {
+    foreach ($project in $Solution.ModernProjects) {
+        try {
+            $project.GetProjectAssetsJsonFile()
+        }
+        catch [ProjectNotRestoredException] {
+            return $true
+        }
+    }
+    return $false
+}
+#endregion
+
 #region Invoke-SolutionVulnerabilityScan
-function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
-    if ($Restore) {
-        if ($RestoreActionPreference -eq 'OnDemand') {
-            [Solution[]]$solutionsToRestore = @()
-            foreach ($sln in $Solution) {
-                $projectsToBeRestored = @($_.ModernProjects | Where-Object { $null -eq $_.GetProjectAssetsJsonFile($false) })
-                if ($projectsToBeRestored) {
-                    $solutionsToRestore += $sln
-                }
-            }
-            Invoke-ParallelRestore $solutionsToRestore
-        }
-        else {
-            Invoke-ParallelRestore $Solution
-        }
+function Invoke-SolutionVulnerabilityScan([Solution[]]$Solutions) {
+    if ($Restore -and $RestoreActionPreference -eq 'OnDemand') {
+        $solutionsToRestore = $Solutions | Where-Object { Test-SolutionRequiresRestore $_ }
+        Invoke-ParallelRestore $solutionsToRestore
+    }
+    elseif ($Restore) {
+        Invoke-ParallelRestore $Solutions
     }
     $nugetService = [NugetService]::new()
     $advisoryService = [AdvisoryService]::new()
@@ -1212,14 +1244,13 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
     $auditor.Settings.IncludeDependencies = !$Minimal
     $auditor.Settings.ScanMode = $ProjectsToScan
 
-    $results = $Solution | ForEach-Object { $auditor.RunSolutionAudit($_) }
+    $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_) }
 
     if ($OnlyProjectsWithVulnerabilities) {
         foreach ($solutionAudit in $results) {
             $solutionAudit.Projects = @($solutionAudit.Projects | Where-Object { $_.VulnerabilityCount.Total -gt 0 })
         }
     }
-
     return $results
 }
 #endregion
@@ -1235,15 +1266,14 @@ function Find-Solutions([string]$Path) {
 
 #region MAIN
 if (!(Test-Path -Path $SolutionPath)) {
-    throw "Provided path does not exist: $SolutionPath"
+    throw [PathDoesNotExistException]::new($SolutionPath)
 }
 
 if (Test-Path -Path $SolutionPath -PathType Leaf) {
     [System.IO.FileInfo]$slnFile = $SolutionPath
 
     if ($slnFile.Extension -ne '.sln') {
-        $extension = $slnFile.Extension
-        throw "Provided file is not solution file. Invalid file extension - expected: '.sln' but received: '$extension'"
+        throw [InvalidFileExtensionException]::new($slnFile.Extension)
     }
     $solution = [Solution]::Parse($slnFile)
     $finalResult = Invoke-SolutionVulnerabilityScan $solution
@@ -1251,17 +1281,17 @@ if (Test-Path -Path $SolutionPath -PathType Leaf) {
 elseif ($Recurse) {
     $solutions = Find-Solutions -Path $SolutionPath
     if (!$solutions) {
-        throw "No solution file found in the provided directory and its subdirectories."
+        throw [NoSolutionFoundException]::new()
     }
     $finalResult = Invoke-SolutionVulnerabilityScan $solutions
 }
 else {
     $solution = Find-Solutions -Path $SolutionPath
     if ($null -eq $solution) {
-        throw "Provided directory does not contain any solution file. Use command with: '-Recurse' switch to search for all solutions in every subdirectory"
+        throw [RecurseNotEnabledException]::new('Provided directory does not contain any solution file. Use command with: "-Recurse" switch to search for all solutions in every subdirectory')
     }
     if ($solution -is [System.Collections.ICollection]) {
-        throw "Provided directory contains multiple solution files. Specify solution file directly or use command with: '-Recurse' switch to search for all solutions in directory tree"
+        throw [RecurseNotEnabledException]::new('Provided directory contains multiple solution files. Specify solution file directly or use command with: "-Recurse" switch to search for all solutions in directory tree')
     }
     $finalResult = Invoke-SolutionVulnerabilityScan $solution
 }
