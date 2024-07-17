@@ -593,18 +593,21 @@ class PackageStore {
     }
 
     hidden [void]PropagateVulnerableDependenciesFlag() {
-        [Package[]]$packagesWithVulnerableDeps = $this.Store.Values | Where-Object { $_.HasVulnerableDependencies }
-        $newCount = $packagesWithVulnerableDeps.Count
-        $prevCount = 0
-        while ($newCount -ne $prevCount) {
-            foreach ($package in $packagesWithVulnerableDeps) {
-                foreach ($dependant in $package.Dependants) {
+        [System.Collections.Generic.Stack[Package]]$packagesWithVulnerableDeps = `
+            [System.Collections.Generic.Stack[Package]]::new()
+        foreach ($package in $this.Store.Values) {
+            if ($package.HasVulnerableDependencies) {
+                $packagesWithVulnerableDeps.Push($package)
+            }
+        }
+        while ($packagesWithVulnerableDeps.Count -gt 0) {
+            [Package]$package = $packagesWithVulnerableDeps.Pop()
+            foreach ($dependant in $package.Dependants) {
+                if (!$dependant.HasVulnerableDependencies) {
                     $dependant.HasVulnerableDependencies = $true
+                    $packagesWithVulnerableDeps.Push($dependant)
                 }
             }
-            $packagesWithVulnerableDeps = $this.Store.Values | Where-Object { $_.HasVulnerableDependencies }
-            $prevCount = $newCount
-            $newCount = $packagesWithVulnerableDeps.Count
         }
     }
 
