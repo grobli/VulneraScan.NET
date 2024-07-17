@@ -1258,11 +1258,10 @@ elseif ($Recurse) {
 else {
     $solution = Find-Solutions -Path $SolutionPath
     if ($null -eq $solution) {
-        throw "Provided directory does not contain solution file. Use command with: '-Recurse' switch to search for all solutions in directory tree"
+        throw "Provided directory does not contain any solution file. Use command with: '-Recurse' switch to search for all solutions in every subdirectory"
     }
     if ($solution -is [System.Collections.ICollection]) {
-        $files = [string]::Join(', ', ($solution | Select-Object -Property File))
-        throw "Provided directory contains multiple solution files ($files). Specify solution file directly or use command with: '-Recurse' switch to search for all solutions in directory tree"
+        throw "Provided directory contains multiple solution files. Specify solution file directly or use command with: '-Recurse' switch to search for all solutions in directory tree"
     }
     $finalResult = Invoke-SolutionVulnerabilityScan $solution
 }
