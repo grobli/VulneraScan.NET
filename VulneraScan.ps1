@@ -20,7 +20,8 @@ param (
     [Parameter()][ValidateSet('OnDemand', 'Always', 'Force')]$RestoreActionPreference = 'OnDemand',
     [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet',
     [Parameter()][int]$RestoreMaxParallelism = 0,
-    [Parameter()][switch]$OnlyProjectsWithVulnerabilities
+    [Parameter()][switch]$OnlyProjectsWithVulnerabilities,
+    [Parameter()][switch]$Minimal
 )
 #endregion
 
@@ -199,13 +200,10 @@ class PackageAudit {
         | ForEach-Object {
             $_.VersionRange.Max
         }
-
         if (!$versions) {
             return $null
         }
-
         $maxPatchedVersion = ($versions | Sort-Object -Descending)[0]
-
         # check if there is any uncertain version that is higher than inferred max patched version from Version Ranges
         foreach ($vln in  @($this.Vulnerabilities | Where-Object { $_.VersionRange.IsMaxInclusive })) {
             if ($vln.VersionRange.Max -gt $maxPatchedVersion) {
@@ -382,9 +380,16 @@ class Project {
         $this.IsLegacy = !$this.IsSdkStyle()
     }
 
+    [Package[]]GetPackages() {
+        [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig() } 
+        else { $this.ReadProjectAssetsJson() }
+        return $packages
+    }
+
     [Package[]]GetPackages([NugetService]$nugetService) {
         $packageStore = [PackageStore]::new($nugetService)
-        [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } else { $this.ReadProjectAssetsJson($packageStore) }
+        [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } 
+        else { $this.ReadProjectAssetsJson($packageStore) }
         return $packages
     }
 
@@ -412,49 +417,71 @@ class Project {
         $sdkAttribute = $projectNode.Attributes | Where-Object { $_.Name -eq 'Sdk' }
         return $null -ne $sdkAttribute
     }
+
+    hidden [Package[]]ReadPackagesConfig() {
+        [Package[]]$packages = @()
+        if (!$this.PackagesConfigFile) {
+            return $packages
+        }
+        $ids = $this.ParsePackagesConfig()
+        foreach ($id in $ids) {
+            $packages += [Package]::new($id)
+        }
+        return $packages
+    }
   
     hidden [Package[]]ReadPackagesConfig([PackageStore]$packageStore) {
         if (!$this.PackagesConfigFile) {
             return @()
         }
-
-        $nodes = [xml]([System.IO.File]::ReadAllText($this.PackagesConfigFile.FullName)) `
-        | Select-Xml -XPath './/package' `
-        | Select-Object -ExpandProperty Node
-
-        foreach ($node in $nodes) {
-            $id = [PackageId]::Create($node.id, $node.version)
+        foreach ($id in $this.ParsePackagesConfig()) {
             $packageStore.Add($id)
         }
         return $packageStore.GetAll()
     }
 
-    hidden [Package[]]ReadProjectAssetsJson([PackageStore]$packageStore) {
-        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile($true)
-        return [Project]::ParseProjectAssetsJson($projectAssetsJsonFile, $packageStore)
+    hidden [PackageId[]]ParsePackagesConfig() {
+        $ids = [xml]([System.IO.File]::ReadAllText($this.PackagesConfigFile.FullName)) `
+        | Select-Xml -XPath './/package' `
+        | Select-Object -ExpandProperty Node `
+        | ForEach-Object { [PackageId]::Create($_.id, $_.version) }
+        return $ids
     }
 
-    hidden static [Package[]]ParseProjectAssetsJson([System.IO.FileInfo]$projectAssetsFile, [PackageStore]$packageStore) {
-        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsFile.FullName) 
-        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-       
-        $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
-        $entries = $targets `
-        | Select-Object -Property Name, Value `
-        | Where-Object { $_.Value.type -eq 'package' }
-
+    hidden [Package[]]ReadProjectAssetsJson() {
+        $entries = $this.ParseProjectAssetsJson()
+        [Package[]]$packages = @()
         foreach ($entry in $entries) {
-            $dependencies = @()
+            $id = [PackageId]::Create($entry.Name)
+            $packages += [Package]::new($id)
+        }
+        return $packages
+    }
+
+    hidden [Package[]]ReadProjectAssetsJson([PackageStore]$packageStore) {
+        $entries = $this.ParseProjectAssetsJson()
+        foreach ($entry in $entries) {
+            $packageId = [PackageId]::Create($entry.Name)
+            $packageStore.Add($packageId)
             if ($entry.Value.dependencies) {
                 $dependencies = $entry.Value.dependencies.PSObject.Properties `
                 | Select-Object -Property Name, Value `
                 | ForEach-Object { [PackageId]::Create($_.Name, $_.Value) }
+                $packageStore.SetDependencies($packageId, $dependencies)
             }
-            $packageId = [PackageId]::Create($entry.Name)
-            $packageStore.Add($packageId)
-            $packageStore.SetDependencies($packageId, $dependencies)
         }
         return $packageStore.GetAll()
+    }
+
+    hidden [PSCustomObject[]]ParseProjectAssetsJson() {
+        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile($true)
+        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
+        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+        $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
+        $entries = $targets `
+        | Select-Object -Property Name, Value `
+        | Where-Object { $_.Value.type -eq 'package' }
+        return $entries
     }
 
     hidden [System.IO.FileInfo]GetPackagesConfig() {
@@ -759,44 +786,88 @@ class NugetService {
 class VulnerabilityAuditor {
     hidden [NugetService]$NugetService
     hidden [AdvisoryService]$AdvisoryService
+    hidden [System.Collections.Generic.Dictionary[PackageId, PackageAudit]]$AuditWithVulnerabilitiesCache
+    hidden [System.Collections.Generic.HashSet[PackageId]]$AuditNoVulnerableSet
 
     VulnerabilityAuditor([NugetService]$nugetService, [AdvisoryService]$advisoryService) {
         $this.NugetService = $nugetService
         $this.AdvisoryService = $advisoryService
+        $this.AuditWithVulnerabilitiesCache = [System.Collections.Generic.Dictionary[PackageId, PackageAudit]]::new()
+        $this.AuditNoVulnerableSet = [System.Collections.Generic.HashSet[PackageId]]::new()
     }
 
-    [SolutionAudit]RunSolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
-        $legacyAudits = $solution.LegacyProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
-        $audits = $solution.ModernProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
-        return [SolutionAudit]::new($solution.File, $legacyAudits, $audits)
+    [SolutionAudit]RunSolutionAudit([Solution]$solution, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+        [ProjectAudit[]]$legacyAudits = @()
+        foreach ($project in $solution.LegacyProjects) {
+            $legacyAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies) 
+        }
+        [ProjectAudit[]]$modernAudits = @()
+        foreach ($project in $solution.ModernProjects) {
+            $modernAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies)
+        }
+        return [SolutionAudit]::new($solution.File, $legacyAudits, $modernAudits)
     }
 
-    [SolutionAudit]RunModernSolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
-        $audits = $solution.ModernProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+    [SolutionAudit]RunModernSolutionAudit([Solution]$solution, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+        [ProjectAudit[]]$modernAudits = @()
+        foreach ($project in $solution.ModernProjects) {
+            $modernAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies)
+        }
         $solution.LegacyProjects | ForEach-Object {
             Write-Warning -Message "ProjectsToScan='Modern' - Ignoring legacy project: $_"
         }
-        return [SolutionAudit]::new($solution.File, @(), $audits)
+        return [SolutionAudit]::new($solution.File, @(), $modernAudits)
     }
 
-    [SolutionAudit]RunLegacySolutionAudit([Solution]$solution, [bool]$findPatchedOnline) {
-        $legacyAudits = $solution.LegacyProjects | ForEach-Object { $this.RunProjectAudit($_, $findPatchedOnline) }
+    [SolutionAudit]RunLegacySolutionAudit([Solution]$solution, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+        [ProjectAudit[]]$legacyAudits = @()
+        foreach ($project in $solution.LegacyProjects) {
+            $legacyAudits += $this.RunProjectAudit($project, $findPatchedOnline, $includeDependencies) 
+        }
         $solution.ModernProjects | ForEach-Object {
             Write-Warning -Message "ProjectsToScan='Legacy' - Ignoring modern project: $_"
         }
         return [SolutionAudit]::new($solution.File, $legacyAudits, @())
     }
 
-    hidden [ProjectAudit]RunProjectAudit([Project]$project, [bool]$findPatchedOnline) {
-        [Package[]]$packages = $project.GetPackages($this.NugetService)
+    hidden [ProjectAudit]RunProjectAudit([Project]$project, [bool]$findPatchedOnline, [bool]$includeDependencies) {
+        if ($includeDependencies) {
+            [Package[]]$packages = $project.GetPackages($this.NugetService)
+            [PackageAudit[]]$audits = @()
+            foreach ($package in $packages) {
+                if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
+                    $audit = $this.CreatePackageAudit($package, $findPatchedOnline)
+                    $audits += $audit
+                }
+            }
+            return [ProjectAudit]::new($project, $audits)
+        }
+        return $this.RunProjectAuditNoDeps($project, $findPatchedOnline)
+    }
+
+    hidden [ProjectAudit]RunProjectAuditNoDeps([Project]$project, [bool]$findPatchedOnline) {
+        [Package[]]$packages = $project.GetPackages()
         [PackageAudit[]]$audits = @()
         foreach ($package in $packages) {
-            if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
+            if ($this.AuditNoVulnerableSet.Contains($package.Id)) {
+                continue
+            }
+            if ($this.AuditWithVulnerabilitiesCache.ContainsKey($package.Id)) {
+                $audits += $this.AuditWithVulnerabilitiesCache[$package.Id]
+                continue
+            }
+            $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
+            if ($package.IsVulnerable()) {
                 $audit = $this.CreatePackageAudit($package, $findPatchedOnline)
+                $this.AuditWithVulnerabilitiesCache[$package.Id] = $audit
                 $audits += $audit
+            }
+            else {
+                $this.AuditNoVulnerableSet.Add($package.Id) 
             }
         }
         return [ProjectAudit]::new($project, $audits)
+
     }
 
     [PackageAudit]CreatePackageAudit([Package]$package, [bool]$findPatchedOnline) {
@@ -1105,14 +1176,12 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solution) {
     $auditor = [VulnerabilityAuditor]::new($nugetService, $advisoryService)
     $results = $Solution | ForEach-Object {
         if ($ProjectsToScan -eq 'All') {
-            return $auditor.RunSolutionAudit($_, $FindPatchedOnline)
-        }
-    
+            return $auditor.RunSolutionAudit($_, $FindPatchedOnline, !$Minimal)
+        } 
         if ($ProjectsToScan -eq 'Legacy') {
-            return $auditor.RunLegacySolutionAudit($_, $FindPatchedOnline)
+            return $auditor.RunLegacySolutionAudit($_, $FindPatchedOnline, !$Minimal)
         }
-    
-        return $auditor.RunModernSolutionAudit($_, $FindPatchedOnline)
+        return $auditor.RunModernSolutionAudit($_, $FindPatchedOnline, !$Minimal)
     }
 
     if ($OnlyProjectsWithVulnerabilities) {
