@@ -12,12 +12,12 @@ param (
     [Parameter()][ValidateSet('Json', 'Text')]$Format,
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
-    [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$MinimumBreakLevel = 'Low',
+    [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$BreakOnSeverity = 'Low',
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType = 'All',
     [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan = 'All',
     [Parameter()][switch]$Restore,
-    [Parameter()][ValidateSet('OnDemand', 'Always', 'Force')]$RestoreActionPreference = 'OnDemand',
+    [Parameter()][ValidateSet('OnDemand', 'Force')]$RestoreActionPreference = 'OnDemand',
     [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet',
     [Parameter()][int]$RestoreMaxParallelism = 0,
     [Parameter()][switch]$OnlyProjectsWithVulnerabilities,
@@ -152,6 +152,15 @@ class SolutionAudit {
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
     }
 
+    [hashtable]GetProjectsDirectDependencies() {
+        $projectsDependencies = @{}
+        foreach ($project in $this.Projects) {
+            $projectsDependencies[$project.ProjectName] = $project.DirectDependencies `
+            | Select-Object -ExpandProperty Id
+        }
+        return $projectsDependencies
+    }
+
     hidden [PackageAudit[]]FindUniqueVulnerablePackages() {
         $packages = @($this.Projects.VulnerablePackages | Where-Object { $_ })
         if ($packages.Count -eq 0) {
@@ -177,8 +186,10 @@ class ProjectAudit {
     [PackageAudit[]]$VulnerableDirectPackages
     [string]$ProjectPath
     [string]$ProjectType
+    [Package[]]$DirectDependencies
+    [Package[]]$TransitiveDependencies
     
-    ProjectAudit([Project]$project, [PackageAudit[]]$audits) {
+    ProjectAudit([Project]$project, [PackageAudit[]]$audits, [Package[]]$packages) {
         $this.ProjectName = $project.File.BaseName
         $this.ProjectPath = $project.File.FullName
         $this.ProjectType = if ($project.IsLegacy) { 'Legacy' } else { 'Modern' }
@@ -193,6 +204,8 @@ class ProjectAudit {
         | Sort-Object -Property PackageName
         $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
+        $this.DirectDependencies = $packages | Where-Object { $_.IsDirect() }
+        $this.TransitiveDependencies = $packages | Where-Object { $_.IsTransitive() }
     }
 }
 #endregion
@@ -585,6 +598,10 @@ class Package {
         return $this.Dependants.Count -gt 0
     }
 
+    [bool]IsDirect() {
+        return -not $this.IsTransitive()
+    }
+
     [bool]IsVulnerable() {
         return $this.Vulnerabilities.Count -gt 0
     }
@@ -900,7 +917,7 @@ class VulnerabilityAuditor {
                     $audits += $audit
                 }
             }
-            return [ProjectAudit]::new($project, $audits)
+            return [ProjectAudit]::new($project, $audits, $packages)
         }
         return $this.RunProjectAuditNoDeps($project)
     }
@@ -926,7 +943,7 @@ class VulnerabilityAuditor {
                 $this.AuditNoVulnerableSet.Add($package.Id) 
             }
         }
-        return [ProjectAudit]::new($project, $audits)
+        return [ProjectAudit]::new($project, $audits, $packages)
 
     }
 
@@ -1213,27 +1230,9 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
 }
 #endregion
 
-#region Test-SolutionRequiresRestore
-function Test-SolutionRequiresRestore([Solution]$Solution) {
-    foreach ($project in $Solution.ModernProjects) {
-        try {
-            $project.GetProjectAssetsJsonFile()
-        }
-        catch [ProjectNotRestoredException] {
-            return $true
-        }
-    }
-    return $false
-}
-#endregion
-
 #region Invoke-SolutionVulnerabilityScan
 function Invoke-SolutionVulnerabilityScan([Solution[]]$Solutions) {
-    if ($Restore -and $RestoreActionPreference -eq 'OnDemand') {
-        $solutionsToRestore = $Solutions | Where-Object { Test-SolutionRequiresRestore $_ }
-        Invoke-ParallelRestore $solutionsToRestore
-    }
-    elseif ($Restore) {
+    if ($Restore) {
         Invoke-ParallelRestore $Solutions
     }
     $nugetService = [NugetService]::new()
@@ -1300,15 +1299,15 @@ Format-AuditResult $finalResult
 
 #region BuildBreaker
 if ($BuildBreaker) {
-    if ($BreakOnProjectType -eq 'All' -and $finalResult.VulnerabilityCount.All.GetTotalFromLevel($MinimumBreakLevel) -gt 0) { 
+    if ($BreakOnProjectType -eq 'All' -and $finalResult.VulnerabilityCount.All.GetTotalFromLevel($BreakOnSeverity) -gt 0) { 
         exit 1 
     }
 
-    if ($BreakOnProjectType -eq 'Modern' -and $finalResult.VulnerabilityCount.Modern.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
+    if ($BreakOnProjectType -eq 'Modern' -and $finalResult.VulnerabilityCount.Modern.GetTotalFromLevel($BreakOnSeverity) -gt 0) {
         exit 1
     }
 
-    if ($BreakOnProjectType -eq 'Legacy' -and $finalResult.VulnerabilityCount.Legacy.GetTotalFromLevel($MinimumBreakLevel) -gt 0) {
+    if ($BreakOnProjectType -eq 'Legacy' -and $finalResult.VulnerabilityCount.Legacy.GetTotalFromLevel($BreakOnSeverity) -gt 0) {
         exit 1
     }
 }
