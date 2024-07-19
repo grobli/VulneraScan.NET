@@ -189,6 +189,8 @@ class ProjectAudit {
     [string]$ProjectType
     [Package[]]$DirectDependencies
     [Package[]]$TransitiveDependencies
+    [Package[]]$PackageReferences
+    [Package[]]$TransitiveOverrides
     
     ProjectAudit([Project]$project, [PackageAudit[]]$audits, [Package[]]$packages) {
         $this.ProjectName = $project.File.BaseName
@@ -210,6 +212,8 @@ class ProjectAudit {
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
         $this.DirectDependencies = $packages | Where-Object { $_.IsDirect() }
         $this.TransitiveDependencies = $packages | Where-Object { $_.IsTransitive() }
+        $this.PackageReferences = $packages | Where-Object { $_.IsPackageReference }
+        $this.TransitiveOverrides = $packages | Where-Object { $_.IsPackageReference -and $_.IsTransitive() }  
     }
 }
 #endregion
@@ -444,10 +448,15 @@ class Project {
         $packageStore = [PackageStore]::new($nugetService)
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } 
         else { $this.ReadProjectAssetsJson($packageStore) }
+        $projectRelatedPackages = [System.Collections.Generic.HashSet[Package]]::new()
         foreach ($package in $packages) {
             $package.IsPackageReference = $this.PackageReferences.Contains($package.Id.Name)
+            if ($package.IsPackageReference) {
+                $projectRelatedPackages.Add($package)
+                $projectRelatedPackages.UnionWith($package.GetAllTransitives())
+            }
         }
-        return $packages
+        return $projectRelatedPackages
     }
 
     [System.IO.FileInfo]GetProjectAssetsJsonFile() {
@@ -569,8 +578,7 @@ class PackageId {
     [version]$Version
     hidden [string]$Value
 
-    hidden static [System.Collections.Generic.Dictionary[string, PackageId]]$Cache = `
-        [System.Collections.Generic.Dictionary[string, PackageId]]::new()
+    hidden static $Cache = [System.Collections.Generic.Dictionary[string, PackageId]]::new()
 
     static [PackageId]Create([string]$packageIdString) {
         $packageIdString = $packageIdString.Trim().ToLower()
@@ -651,6 +659,21 @@ class Package {
     [string]ToString() {
         return $this.Id
     }
+
+    [System.Collections.Generic.HashSet[Package]]GetAllTransitives() {
+        $transitives = [System.Collections.Generic.HashSet[Package]]::new()
+        $stack = [System.Collections.Generic.Stack[Package]]::new()
+        $stack.Push($this)
+        while ($stack.Count -gt 0) {
+            $pkg = $stack.Pop()
+            foreach ($dep in $pkg.Dependencies) {
+                if ($transitives.Add($dep)) {
+                    $stack.Push($dep)
+                }
+            }
+        }
+        return $transitives
+    }
 }
 #endregion
 
@@ -698,8 +721,7 @@ class PackageStore {
     }
 
     hidden [void]PropagateVulnerableDependenciesFlag() {
-        [System.Collections.Generic.Stack[Package]]$packagesWithVulnerableDeps = `
-            [System.Collections.Generic.Stack[Package]]::new()
+        $packagesWithVulnerableDeps = [System.Collections.Generic.Stack[Package]]::new()
         foreach ($package in $this.Store.Values) {
             if ($package.HasVulnerableDependencies) {
                 $packagesWithVulnerableDeps.Push($package)
