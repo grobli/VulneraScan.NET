@@ -116,7 +116,13 @@ class SolutionAuditPlural {
     SolutionAuditPlural([SolutionAudit[]]$solutions) {
         $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
         $this.Solutions = [System.Collections.Generic.SortedDictionary[string, SolutionAudit]]::new()
-        $solutions | ForEach-Object { $this.Solutions[$_.SolutionName] = $_ }
+        foreach ($sln in $solutions) {
+            if ($this.Solutions.ContainsKey($sln.SolutionName)) {
+                $this.Solutions[$sln.SolutionName + '*'] = $sln
+                continue
+            }
+            $this.Solutions[$_.SolutionName] = $_ 
+        }
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
     }
