@@ -184,6 +184,7 @@ class ProjectAudit {
     [PackageAudit[]]$VulnerablePackages
     [PackageAudit[]]$PackagesWithVulnerableDependencies
     [PackageAudit[]]$VulnerableDirectPackages
+    [PackageAudit[]]$VulnerablePackageReferences
     [string]$ProjectPath
     [string]$ProjectType
     [Package[]]$DirectDependencies
@@ -201,6 +202,9 @@ class ProjectAudit {
         | Sort-Object -Property PackageName 
         $this.VulnerableDirectPackages = $audits `
         | Where-Object { !$_.IsTransitive } `
+        | Sort-Object -Property PackageName
+        $this.VulnerablePackageReferences = $audits `
+        | Where-Object { $_.IsPackageReference } `
         | Sort-Object -Property PackageName
         $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
@@ -222,6 +226,7 @@ class PackageAudit {
     [string[]]$DependentPackages
     [string[]]$VulnerableDependencies
     [bool]$IsTransitive
+    [bool]$IsPackageReference
 
     PackageAudit([Package]$package) {
         $this.PackageId = $package.Id.ToString()
@@ -234,6 +239,7 @@ class PackageAudit {
         $this.DependentPackages = $package.Dependants | ForEach-Object { $_.Id.ToString() }
         $this.VulnerableDependencies = $package.Dependencies | Where-Object { $_.IsVulnerable() -or $_.HasVulnerableDependencies }
         $this.IsTransitive = $package.IsTransitive()
+        $this.IsPackageReference = $package.IsPackageReference
     }
 
     hidden [string]GetPatchedVersion() {
@@ -413,17 +419,24 @@ class Project {
     [System.IO.FileInfo]$Solution
     [bool]$IsLegacy
     hidden [System.IO.FileInfo]$PackagesConfigFile
+    hidden [System.Collections.Generic.HashSet[string]]$PackageReferences
+    hidden [xml]$CsprojContent
 
     Project([string]$projectPath, [string]$solutionPath) {
         $this.File = $projectPath
         $this.Solution = $solutionPath
         $this.PackagesConfigFile = $this.GetPackagesConfig()
+        $this.CsprojContent = [System.IO.File]::ReadAllText($this.File.FullName)
         $this.IsLegacy = !$this.IsSdkStyle()
+        $this.PackageReferences = $this.ReadPackageReferences()
     }
 
     [Package[]]GetPackages() {
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig() } 
         else { $this.ReadProjectAssetsJson() }
+        foreach ($package in $packages) {
+            $package.IsPackageReference = $this.PackageReferences.Contains($package.Id.Name)
+        }
         return $packages
     }
 
@@ -431,6 +444,9 @@ class Project {
         $packageStore = [PackageStore]::new($nugetService)
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } 
         else { $this.ReadProjectAssetsJson($packageStore) }
+        foreach ($package in $packages) {
+            $package.IsPackageReference = $this.PackageReferences.Contains($package.Id.Name)
+        }
         return $packages
     }
 
@@ -449,11 +465,25 @@ class Project {
     }
 
     hidden [bool]IsSdkStyle() {
-        $projectNode = [xml]([System.IO.File]::ReadAllText($this.File.FullName)) `
+        $projectNode = $this.CsprojContent `
         | Select-Xml -XPath './Project' -ErrorAction SilentlyContinue `
         | Select-Object -ExpandProperty Node
         $sdkAttribute = $projectNode.Attributes | Where-Object { $_.Name -eq 'Sdk' }
         return $null -ne $sdkAttribute
+    }
+
+    hidden [System.Collections.Generic.HashSet[string]]ReadPackageReferences() {
+        if ($this.IsLegacy) {
+            return @()
+        }
+        $prefs = $this.CsprojContent `
+        | Select-Xml -XPath './/PackageReference' -ErrorAction SilentlyContinue `
+        | Select-Object -ExpandProperty Node
+        $set = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($pref in $prefs) {
+            $set.Add($pref.Include.Trim().ToLower())
+        }
+        return $set
     }
 
     hidden [Package[]]ReadPackagesConfig() {
@@ -589,6 +619,7 @@ class Package {
     [Package[]]$Dependencies = @()
     [Package[]]$Dependants = @()
     [bool]$HasVulnerableDependencies
+    [bool]$IsPackageReference
 
     Package([PackageId]$packageId) {
         $this.Id = $packageId
