@@ -121,7 +121,7 @@ class SolutionAuditPlural {
                 $this.Solutions[$sln.SolutionName + '*'] = $sln
                 continue
             }
-            $this.Solutions[$_.SolutionName] = $_ 
+            $this.Solutions[$sln.SolutionName] = $sln 
         }
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
