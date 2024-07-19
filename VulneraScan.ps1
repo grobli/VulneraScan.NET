@@ -109,13 +109,14 @@ class Vulnerability {
 
 #region SolutionAuditPlural
 class SolutionAuditPlural {
-    [SolutionAudit[]]$Solutions
+    [System.Collections.Generic.SortedDictionary[string, SolutionAudit]]$Solutions
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
     [PackageAudit[]]$VulnerablePackages
 
     SolutionAuditPlural([SolutionAudit[]]$solutions) {
         $counts = $solutions | Select-Object -ExpandProperty VulnerabilityCount
-        $this.Solutions = $solutions | Sort-Object -Property SolutionName
+        $this.Solutions = [System.Collections.Generic.SortedDictionary[string, SolutionAudit]]::new()
+        $solutions | ForEach-Object { $this.Solutions[$_.SolutionName] = $_ }
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::SumCounts($counts)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
     }
