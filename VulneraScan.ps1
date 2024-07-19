@@ -140,14 +140,15 @@ class SolutionAuditPlural {
 class SolutionAudit {
     [string]$SolutionName
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
-    [ProjectAudit[]]$Projects
+    [System.Collections.Generic.SortedDictionary[string, ProjectAudit]]$Projects
     [string]$SolutionPath
     [PackageAudit[]]$VulnerablePackages
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
         $this.SolutionName = $solutionFile.BaseName
-        $this.Projects = ($audits + $legacyAudits) | Sort-Object -Property ProjectName
+        $this.Projects = [System.Collections.Generic.SortedDictionary[string, ProjectAudit]]::new()
+        ($audits + $legacyAudits) | ForEach-Object { $this.Projects[$_.ProjectName] = $_ }
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
     }
