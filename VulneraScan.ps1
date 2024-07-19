@@ -680,13 +680,13 @@ class Package {
 #region PackageStore
 class PackageStore {
     hidden [System.Collections.Generic.Dictionary[string, Package]]$Store
-    hidden [System.Collections.Generic.Dictionary[PackageId, PackageId[]]]$DependencyMapping
+    hidden [System.Collections.Generic.Dictionary[string, PackageId[]]]$DependencyMapping
 
     hidden [NugetService]$NugetService
         
     PackageStore([NugetService]$nugetService) {
         $this.Store = [System.Collections.Generic.Dictionary[string, Package]]::new()
-        $this.DependencyMapping = [System.Collections.Generic.Dictionary[PackageId, PackageId[]]]::new()
+        $this.DependencyMapping = [System.Collections.Generic.Dictionary[string, PackageId[]]]::new()
         $this.NugetService = $nugetService
     }
 
@@ -696,25 +696,27 @@ class PackageStore {
     }
 
     [void]SetDependencies([PackageId]$packageId, [PackageId[]]$dependencyIds) {
-        $this.DependencyMapping[$packageId] = $dependencyIds
+        $this.DependencyMapping[$packageId.Name] = $dependencyIds
     }
 
     [Package[]]GetAll() {
         $packages = $this.Store.Values
         foreach ($package in $packages) {
             $this.SetupDependencies($package)
-        }
-        foreach ($package in $packages) {
-            $this.FindVulnerabilities($package)
+            $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
         }
         $this.PropagateVulnerableDependenciesFlag()
         return $packages
     }
 
     hidden [void]SetupDependencies([Package]$package) {
-        $dependencyIds = $this.DependencyMapping[$package.Id]
+        $dependencyIds = $this.DependencyMapping[$package.Id.Name]
         foreach ($depId in $dependencyIds) {
             $dep = $this.Store[$depId.Name]
+            if (!$dep) {
+                Write-Warning "$dep dependency not found in the Package Store"
+                continue
+            }
             $package.Dependencies += $dep
             $dep.Dependants += $package
         }
@@ -723,7 +725,7 @@ class PackageStore {
     hidden [void]PropagateVulnerableDependenciesFlag() {
         $packagesWithVulnerableDeps = [System.Collections.Generic.Stack[Package]]::new()
         foreach ($package in $this.Store.Values) {
-            if ($package.HasVulnerableDependencies) {
+            if ($package.IsVulnerable()) {
                 $packagesWithVulnerableDeps.Push($package)
             }
         }
@@ -734,15 +736,6 @@ class PackageStore {
                     $dependant.HasVulnerableDependencies = $true
                     $packagesWithVulnerableDeps.Push($dependant)
                 }
-            }
-        }
-    }
-
-    hidden [void]FindVulnerabilities([Package]$package) {
-        $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
-        if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
-            foreach ($dependant in $package.Dependants) {
-                $dependant.HasVulnerableDependencies = $true
             }
         }
     }
