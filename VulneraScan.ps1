@@ -148,8 +148,8 @@ class SolutionAudit {
     [string]$SolutionName
     [SolutionAuditVulnerabilityCount]$VulnerabilityCount
     [System.Collections.Generic.SortedDictionary[string, ProjectAudit]]$Projects
-    [string]$SolutionPath
     [PackageAudit[]]$VulnerablePackages
+    [string]$SolutionPath
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
@@ -189,16 +189,16 @@ class SolutionAudit {
 class ProjectAudit {
     [string]$ProjectName
     [VulnerabilityCount]$VulnerabilityCount
+    [PackageAudit[]]$VulnerablePackageReferences
+    [PackageAudit[]]$VulnerableDirectPackages
     [PackageAudit[]]$VulnerablePackages
     [PackageAudit[]]$PackagesWithVulnerableDependencies
-    [PackageAudit[]]$VulnerableDirectPackages
-    [PackageAudit[]]$VulnerablePackageReferences
-    [string]$ProjectPath
-    [string]$ProjectType
     [Package[]]$DirectDependencies
     [Package[]]$TransitiveDependencies
     [Package[]]$PackageReferences
     [Package[]]$TransitiveOverrides
+    [string]$ProjectPath
+    [string]$ProjectType
     
     ProjectAudit([Project]$project, [PackageAudit[]]$audits, [Package[]]$packages) {
         $this.ProjectName = $project.File.BaseName
