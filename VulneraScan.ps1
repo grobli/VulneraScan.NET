@@ -150,6 +150,8 @@ class SolutionAudit {
     [System.Collections.Generic.SortedDictionary[string, ProjectAudit]]$Projects
     [PackageAudit[]]$VulnerablePackages
     [string]$SolutionPath
+
+    hidden [CommandToolsSolution]$Tools
     
     SolutionAudit([System.IO.FileInfo]$solutionFile, [ProjectAudit[]]$legacyAudits, [ProjectAudit[]]$audits) {
         $this.SolutionPath = $solutionFile.FullName
@@ -158,6 +160,12 @@ class SolutionAudit {
         ($audits + $legacyAudits) | ForEach-Object { $this.Projects[$_.ProjectName] = $_ }
         $this.VulnerabilityCount = [SolutionAuditVulnerabilityCount]::new($legacyAudits, $audits)
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
+
+        $this.Tools = [CommandToolsSolution]::new($this.Projects.Values.Tools)
+    }
+
+    [CommandToolsSolution]GetTools() {
+        return $this.Tools
     }
 
     [hashtable]GetProjectsDirectDependencies() {
@@ -199,6 +207,8 @@ class ProjectAudit {
     [Package[]]$TransitiveOverrides
     [string]$ProjectPath
     [string]$ProjectType
+
+    hidden [CommandToolsProject]$Tools
     
     ProjectAudit([Project]$project, [PackageAudit[]]$audits, [Package[]]$packages) {
         $this.ProjectName = $project.File.BaseName
@@ -222,6 +232,12 @@ class ProjectAudit {
         $this.TransitiveDependencies = $packages | Where-Object { $_.IsTransitive() }
         $this.PackageReferences = $packages | Where-Object { $_.IsPackageReference }
         $this.TransitiveOverrides = $packages | Where-Object { $_.IsPackageReference -and $_.IsTransitive() }  
+
+        $this.Tools = [CommandToolsProject]::new($project, $this)
+    }
+
+    [CommandToolsProject]GetTools() {
+        return $this.Tools
     }
 }
 #endregion
@@ -430,9 +446,9 @@ class Project {
     [System.IO.FileInfo]$File
     [System.IO.FileInfo]$Solution
     [bool]$IsLegacy
+    [xml]$CsprojContent
+    [System.Collections.Generic.HashSet[string]]$PackageReferences
     hidden [System.IO.FileInfo]$PackagesConfigFile
-    hidden [System.Collections.Generic.HashSet[string]]$PackageReferences
-    hidden [xml]$CsprojContent
 
     Project([string]$projectPath, [string]$solutionPath) {
         $this.File = $projectPath
@@ -636,6 +652,7 @@ class Package {
     [Package[]]$Dependants = @()
     [bool]$HasVulnerableDependencies
     [bool]$IsPackageReference
+    [PackageId[]]$MinimalDependencies
 
     Package([PackageId]$packageId) {
         $this.Id = $packageId
@@ -705,6 +722,8 @@ class PackageStore {
 
     [void]SetDependencies([PackageId]$packageId, [PackageId[]]$dependencyIds) {
         $this.DependencyMapping[$packageId.Name] = $dependencyIds
+        $package = $this.Store[$packageId.Name]
+        $package.MinimalDependencies = $dependencyIds   
     }
 
     [Package[]]GetAll() {
@@ -1147,6 +1166,134 @@ class JsonConverter {
         return $json
     }
 }
+#endregion
+
+#region CommandTools 
+#region CommandToolsSolution
+class CommandToolsSolution {
+    hidden [CommandToolsProject[]]$ProjectTools
+
+    [CommandAction]$RemoveRedundantTransitiveOverrides
+
+    CommandToolsSolution([CommandToolsProject[]]$projectTools) {
+        $this.ProjectTools = $projectTools
+        $this.RemoveRedundantTransitiveOverrides = [RemoveRedundantTransitiveOverridesSolution]::new($this)
+    }
+}
+#endregion
+
+#region CommandToolsProject
+class CommandToolsProject {
+    [CommandAction]$RemoveRedundantTransitiveOverrides
+
+    CommandToolsProject([Project]$project, [ProjectAudit]$audit) {
+        $this.RemoveRedundantTransitiveOverrides = [RemoveRedundantTransitiveOverrides]::new($project, $audit)
+    }
+}
+#endregion
+
+#region CommandAction
+class CommandAction {
+    Run() { throw [System.NotImplementedException]::new() }
+    DryRun() { throw [System.NotImplementedException]::new() }
+}
+#endregion
+
+#region RemoveRedundantTransitiveOverridesSolution
+class RemoveRedundantTransitiveOverridesSolution : CommandAction {
+    hidden [CommandToolsSolution]$SolutionTools
+    
+    RemoveRedundantTransitiveOverridesSolution([CommandToolsSolution]$tools) {
+        $this.SolutionTools = $tools
+    }
+
+    Run() {
+        foreach ($tool in $this.SolutionTools.ProjectTools) {
+            $tool.RemoveRedundantTransitiveOverrides.Run()
+        }
+    }
+
+    DryRun() {
+        foreach ($tool in $this.SolutionTools.ProjectTools) {
+            $tool.RemoveRedundantTransitiveOverrides.DryRun()
+        }
+    }
+}
+#endregion
+
+#region RemoveRedundantTransitiveOverrides
+class RemoveRedundantTransitiveOverrides : CommandAction {
+    hidden [Project]$Project
+    hidden [ProjectAudit]$Audit
+
+    RemoveRedundantTransitiveOverrides([Project]$project, [ProjectAudit]$audit) {
+        $this.Project = $project
+        $this.Audit = $audit
+    }
+
+    Run() {
+        Write-Host 'Project:' $this.Audit.ProjectName
+        $prefs = $this.GetXmlNodes($this.FindRedundantOverrides())
+        foreach ($pref in $prefs) {
+            $name = $pref.OuterXml
+            Write-Host "Removing: $name"
+            $pref.ParentNode.RemoveChild($pref)
+        }
+        $file = $this.Project.File
+        $this.Project.CsprojContent.Save($file)
+        Write-Host "Updated file: $file"
+    }
+
+    DryRun() {
+        Write-Host '--- Dry Run ---'
+        Write-Host 'Project:' $this.Audit.ProjectName
+        $prefs = $this.GetXmlNodes($this.FindRedundantOverrides())
+        foreach ($pref in $prefs) {
+            $name = $pref.OuterXml
+            Write-Host "To be removed: $name"
+        }
+        if (!$prefs) {
+            Write-Host "Nothing to change"
+            return 
+        }
+        $file = $this.Project.File
+        Write-Host "File to update: $file"
+    }
+
+    hidden [Package[]]FindRedundantOverrides() {
+        [Package[]]$tos = $this.Audit.TransitiveOverrides
+        [Package[]]$redundant = @()
+        foreach ($to in $tos) {
+            if ([RemoveRedundantTransitiveOverrides]::IsRedundant($to)) {
+                $redundant += $to
+            }
+          
+        }
+        return $redundant
+    }
+
+    hidden static [bool]IsRedundant([Package]$transitiveOverride) {
+        foreach ($dependant in $transitiveOverride.Dependants) {
+            [Package]$dependant = $dependant
+            [PackageId]$minDep = $dependant.MinimalDependencies | Where-Object { $_.Name -eq $to.Id.Name }
+            # check if transitive override is dependant package upgrade
+            if ($transitiveOverride.Id.Version -gt $minDep.Version) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    hidden [System.Xml.XmlElement[]]GetXmlNodes([Package[]]$packages) {
+        [string[]]$pkgNames = @($packages | ForEach-Object { $_.Id.Name })
+        [System.Xml.XmlElement[]]$prefs = $this.Project.CsprojContent `
+        | Select-Xml -XPath './/PackageReference' `
+        | Select-Object -ExpandProperty Node `
+        | Where-Object { $pkgNames.Contains($_.Include.Trim().ToLower()) }
+        return $prefs
+    }
+}
+#endregion
 #endregion
 
 #region MainBlockFunctions
