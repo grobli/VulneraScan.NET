@@ -20,7 +20,7 @@ param (
     [Parameter()][ValidateSet('OnDemand', 'Force')]$RestoreActionPreference = 'OnDemand',
     [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet',
     [Parameter()][int]$RestoreMaxParallelism = 0,
-    [Parameter()][switch]$OnlyProjectsWithVulnerabilities,
+    [Parameter()][switch]$OnlyVulnerable,
     [Parameter()][switch]$Minimal
 )
 #endregion
@@ -1299,10 +1299,16 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solutions) {
 
     $results = $Solutions | ForEach-Object { $auditor.RunSolutionAudit($_) }
 
-    if ($OnlyProjectsWithVulnerabilities) {
-        foreach ($solutionAudit in $results) {
-            $solutionAudit.Projects = @($solutionAudit.Projects | Where-Object { $_.VulnerabilityCount.Total -gt 0 })
-        }
+    if (-not $OnlyVulnerable) {
+        return $results
+    }
+    foreach ($solutionAudit in $results) {
+        [ProjectAudit[]]$projects = $solutionAudit.Projects.Values
+        foreach ($project in $projects) {
+            if ($project.VulnerabilityCount.Total -eq 0) {
+                $solutionAudit.Projects.Remove($project.ProjectName) | Out-Null
+            }
+        }        
     }
     return $results
 }
