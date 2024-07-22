@@ -26,24 +26,23 @@ param (
 #endregion
 
 #region GlobalVariables
-[bool]$IsNugetExeAvailable = $false
-[bool]$IsDotnetExeAvailable = $false 
+[bool]$IsNugetAppAvailable = $true
+[bool]$IsDotnetAppAvailable = $true 
 
 if ($Restore) {
     try {
-        nuget.exe help | Out-Null
-        $IsNugetExeAvailable = $LASTEXITCODE -eq 0 
+        Get-Command nuget -ErrorAction Stop | Out-Null
     }
     catch {
-        Write-Warning -Message "nuget.exe not found in system PATH"
+        $IsNugetAppAvailable = $false
+        Write-Warning -Message "nuget app not found in system PATH"
     }
-    
     try {
-        dotnet.exe --info | Out-Null
-        $IsDotnetExeAvailable = $LASTEXITCODE -eq 0
+        Get-Command dotnet -ErrorAction Stop | Out-Null
     }
     catch {
-        Write-Warning -Message "dotnet.exe not found in system PATH"
+        $IsDotnetAppAvailable = $false
+        Write-Warning -Message "dotnet app not found in system PATH"
     }
 }
 #endregion
@@ -1371,9 +1370,21 @@ function Format-PackageAuditAsText([PackageAudit]$PackageAudit) {
 }
 #endregion
 
+function Get-CpuCount {
+    #if using Powershell Core on unix
+    if ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.Platform -eq 'Unix') {
+      return [int](nproc --all)
+    }
+     # else if using windows powershell or powershell core on windows
+    return (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+}
+
 #region Invoke-ParallelRestore
 function Invoke-ParallelRestore([Solution[]]$Solutions) {
-    $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+    if (-not ($IsNugetAppAvailable -or $IsDotnetAppAvailable)) {
+        throw "No tool for performing the NuGet restore is available on the machine. Install dotnet or nuget"
+    }
+    $cpuCount = Get-CpuCount
     $jobCount = if ($RestoreMaxParallelism -le 0) { $cpuCount } else { [math]::Min($cpuCount, $RestoreMaxParallelism) }
     $i = 0
     $batches = $Solutions | ForEach-Object {
@@ -1388,17 +1399,17 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
         $WarningPreference = $using:WarningPreference   
         $DebugPreference = $using:DebugPreference
         $VerbosePreference = $using:VerbosePreference
-        $IsNugetExeAvailable = $using:IsNugetExeAvailable
-        $IsDotnetExeAvailable = $using:IsDotnetExeAvailable
+        $IsNugetAppAvailable = $using:IsNugetAppAvailable
+        $IsDotnetAppAvailable = $using:IsDotnetAppAvailable
         $RestoreActionPreference = $using:RestoreActionPreference
         $RestoreToolPreference = $using:RestoreToolPreference
 
         #region Invoke-SolutionRestore
         function Invoke-SolutionRestore([System.IO.FileInfo]$TargetSolution) {
             $path = $TargetSolution.FullName
-            if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetExeAvailable) {
-                if ($IsNugetExeAvailable) {
-                    $command = 'nuget.exe'
+            if ($RestoreToolPreference -eq 'Nuget' -or -not $IsDotnetAppAvailable) {
+                if ($IsNugetAppAvailable) {
+                    $command = 'nuget'
                     $params = 'restore', "$path", '-NonInteractive', '-Verbosity', 'quiet', $forceParam
                     if ($RestoreActionPreference -eq 'Force') { $params += '-Force' } 
                     Write-Verbose -Message "Executing command: $command $params"
@@ -1409,8 +1420,8 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
                     return
                 }
             }
-            if ($IsDotnetExeAvailable) {
-                $command = 'dotnet.exe'
+            if ($IsDotnetAppAvailable) {
+                $command = 'dotnet'
                 $params = 'restore', "$path", '--verbosity', 'quiet', $forceParam
                 if ($RestoreActionPreference -eq 'Force') { $params += '--force' }
                 Write-Verbose -Message "Executing command: $command $params"
@@ -1420,7 +1431,6 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
                 }
                 return
             }
-            throw "No tool for performing the NuGet restore is available on the machine. Install dotnet.exe or nuget.exe."
         }
         #endregion
 
@@ -1429,12 +1439,20 @@ function Invoke-ParallelRestore([Solution[]]$Solutions) {
         | ForEach-Object { Invoke-SolutionRestore $_ }
     }
 
-    try {    
+    $isThreadJobAvailable = $true
+    try {
+        Get-Command -Name Start-ThreadJob -ErrorAction Stop | Out-Null
+    }
+    catch {
+        $isThreadJobAvailable = $false
+    }
+
+    if ($isThreadJobAvailable) {
         $batches `
         | ForEach-Object { $_ | Start-ThreadJob -ScriptBlock $scriptBlock } `
         | Receive-Job -Wait -AutoRemoveJob
     }
-    catch {
+    else {
         $batches `
         | ForEach-Object { $_ | Start-Job -ScriptBlock $scriptBlock } `
         | Receive-Job -Wait -AutoRemoveJob
