@@ -227,11 +227,12 @@ class ProjectAudit {
         | Sort-Object -Property PackageName
         $counts = $audits | Select-Object -ExpandProperty VulnerabilityCount
         $this.VulnerabilityCount = [VulnerabilityCount]::SumCounts($counts)
-        $this.DirectDependencies = $packages | Where-Object { $_.IsDirect() }
-        $this.TransitiveDependencies = $packages | Where-Object { $_.IsTransitive() }
-        $this.PackageReferences = $packages | Where-Object { $_.IsPackageReference }
-        $this.TransitiveOverrides = $packages | Where-Object { $_.IsPackageReference -and $_.IsTransitive() }  
-
+        if ($packages) {
+            $this.DirectDependencies = $packages | Where-Object { $_.IsDirect() }
+            $this.TransitiveDependencies = $packages | Where-Object { $_.IsTransitive() }
+            $this.PackageReferences = $packages | Where-Object { $_.IsPackageReference }
+            $this.TransitiveOverrides = $packages | Where-Object { $_.IsPackageReference -and $_.IsTransitive() }  
+        }
         $this.Tools = [CommandToolsProject]::new($project, $this)
     }
 
@@ -1204,6 +1205,8 @@ class CommandToolsProject {
 
 #region CommandAction
 class CommandAction {
+    CommandAction() {}
+    
     Run() { throw [System.NotImplementedException]::new() }
     DryRun() { throw [System.NotImplementedException]::new() }
 }
