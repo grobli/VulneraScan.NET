@@ -127,7 +127,7 @@ class SolutionAuditPlural {
     }
 
     hidden [PackageAudit[]]FindUniqueVulnerablePackages() {
-        $packages = @($this.Solutions.VulnerablePackages | Where-Object { $_ })
+        $packages = @($this.Solutions.Values.VulnerablePackages | Where-Object { $_ })
         if ($packages.Count -eq 0) {
             return @()
         }
@@ -177,7 +177,7 @@ class SolutionAudit {
     }
 
     hidden [PackageAudit[]]FindUniqueVulnerablePackages() {
-        $packages = @($this.Projects.VulnerablePackages | Where-Object { $_ })
+        $packages = @($this.Projects.Values.VulnerablePackages | Where-Object { $_ })
         if ($packages.Count -eq 0) {
             return @()
         }
@@ -462,16 +462,20 @@ class Project {
     [Package[]]GetPackages() {
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig() } 
         else { $this.ReadProjectAssetsJson() }
-        foreach ($package in $packages) {
-            $package.IsPackageReference = $this.PackageReferences.Contains($package.Id.Name)
-        }
-        return $packages
+        return $this.FilterOutNotRelatedPackages($packages)
     }
 
     [Package[]]GetPackages([NugetService]$nugetService) {
         $packageStore = [PackageStore]::new($nugetService)
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } 
         else { $this.ReadProjectAssetsJson($packageStore) }
+        return $this.FilterOutNotRelatedPackages($packages)
+    }
+
+    hidden [Package[]]FilterOutNotRelatedPackages([Package[]]$packages) {
+        if ($this.IsLegacy) {
+            return $packages
+        }
         $projectRelatedPackages = [System.Collections.Generic.HashSet[Package]]::new()
         foreach ($package in $packages) {
             $package.IsPackageReference = $this.PackageReferences.Contains($package.Id.Name)
@@ -1112,7 +1116,7 @@ class VersionRange {
 #region VersionConverter
 class VersionConverter {
     hidden static $Cache = [System.Collections.Generic.Dictionary[string, version]]::new()
-    hidden static [regex]$Regex = [regex]::new("(\d+\.\d+\.\d+)", [System.Text.RegularExpressions.RegexOptions]::Compiled) 
+    hidden static [regex]$Regex = [regex]::new("(\d+\.\d+\.?\d*)", [System.Text.RegularExpressions.RegexOptions]::Compiled) 
 
     static [version]Convert([string]$versionString) {
         if ([VersionConverter]::Cache.ContainsKey($versionString)) {
