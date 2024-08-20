@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VulneraNet.CLI", "VulneraNet.CLI\VulneraNet.CLI.csproj", "{C6BA2FDC-A232-4AD4-86FF-AFF03844AD0F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VulneraNet.Core", "VulneraNet.Core\VulneraNet.Core.csproj", "{611C4B7D-764F-4263-BF99-92F0BE1FDAE9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C6BA2FDC-A232-4AD4-86FF-AFF03844AD0F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C6BA2FDC-A232-4AD4-86FF-AFF03844AD0F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C6BA2FDC-A232-4AD4-86FF-AFF03844AD0F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C6BA2FDC-A232-4AD4-86FF-AFF03844AD0F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{611C4B7D-764F-4263-BF99-92F0BE1FDAE9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{611C4B7D-764F-4263-BF99-92F0BE1FDAE9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{611C4B7D-764F-4263-BF99-92F0BE1FDAE9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{611C4B7D-764F-4263-BF99-92F0BE1FDAE9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
