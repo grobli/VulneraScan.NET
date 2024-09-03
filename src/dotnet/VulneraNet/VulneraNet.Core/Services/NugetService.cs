@@ -17,16 +17,21 @@ public class NugetService : INugetService
 
     private readonly Task<FrozenDictionary<string, Vulnerability[]>> _vulnerabilityDataTask;
 
-    public NugetService(IResilientHttpClient httpClient)
+    private NugetService(IResilientHttpClient httpClient, CancellationToken cancellationToken)
     {
         _httpClient = httpClient;
         _nugetVulnerabilityIndexUrl = new Uri("https://api.nuget.org/v3/vulnerabilities/index.json");
         _nugetIndexUrl = new Uri("https://api.nuget.org/v3/index.json");
 
-        _vulnerabilityDataTask = FetchVulnerabilitiesDataAsync();
+        _vulnerabilityDataTask = FetchVulnerabilitiesDataAsync(cancellationToken);
     }
 
-    public async Task<IEnumerable<Vulnerability>> FindVulnerabilitiesAsync(PackageId packageId)
+    public static NugetService Create(IResilientHttpClient httpClient, CancellationToken cancellationToken) =>
+        new(httpClient, cancellationToken);
+
+
+    public async Task<IEnumerable<Vulnerability>> FindVulnerabilitiesAsync(PackageId packageId,
+        CancellationToken cancellationToken = default)
     {
         var data = await _vulnerabilityDataTask;
         return data.TryGetValue(packageId.Name, out var vulnerabilities)
@@ -34,15 +39,16 @@ public class NugetService : INugetService
             : [];
     }
 
-    public Task<Version?> FindFirstPatchedVersionAsync(PackageId packageId)
+    public Task<Version?> FindFirstPatchedVersionAsync(PackageId packageId,
+        CancellationToken cancellationToken = default)
     {
         throw new NotImplementedException();
     }
 
-    private async Task<VulnerabilitiesIndex> FetchVulnerabilitiesIndexAsync()
+    private async Task<VulnerabilitiesIndex> FetchVulnerabilitiesIndexAsync(CancellationToken cancellationToken)
     {
         var entries = await _httpClient.GetAsync(_nugetVulnerabilityIndexUrl,
-            SourceGenerationContext.Default.VulnerabilitiesIndexEntryArray);
+            SourceGenerationContext.Default.VulnerabilitiesIndexEntryArray, cancellationToken);
         VulnerabilitiesIndexEntry? baseEntry = default;
         VulnerabilitiesIndexEntry? updateEntry = default;
         foreach (var entry in entries)
@@ -60,14 +66,15 @@ public class NugetService : INugetService
         return new VulnerabilitiesIndex { Base = baseEntry!, Update = updateEntry! };
     }
 
-    private async Task<FrozenDictionary<string, Vulnerability[]>> FetchVulnerabilitiesDataAsync()
+    private async Task<FrozenDictionary<string, Vulnerability[]>> FetchVulnerabilitiesDataAsync(
+        CancellationToken cancellationToken)
     {
-        var index = await FetchVulnerabilitiesIndexAsync();
+        var index = await FetchVulnerabilitiesIndexAsync(cancellationToken);
 
         var baseDataTask = _httpClient.GetAsync(index.Base.Id,
-            SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry);
+            SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry, cancellationToken);
         var updateDataTask = _httpClient.GetAsync(index.Update.Id,
-            SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry);
+            SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry, cancellationToken);
         await Task.WhenAll(baseDataTask, updateDataTask);
 
         var baseData = await baseDataTask;

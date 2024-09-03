@@ -24,19 +24,22 @@ public class Project
     private readonly Task<XmlDocument> _xmlContentTask;
     private readonly Task<FrozenSet<string>> _packageReferencesTask;
 
-    public static async Task<Project> LoadAsync(string projectPath, Solution solution, IFileSystem fileSystem)
+    public static async Task<Project> LoadAsync(string projectPath, Solution solution, IFileSystem fileSystem,
+        CancellationToken cancellationToken = default)
     {
         var project = new Project(projectPath, solution, fileSystem);
         await project.SetupPropertiesAsync();
         return project;
     }
 
-    public static async Task<Project> LoadAsync(string projectPath, Solution solution) =>
-        await LoadAsync(projectPath, solution, new FileSystem());
+    public static async Task<Project> LoadAsync(string projectPath, Solution solution,
+        CancellationToken cancellationToken = default) =>
+        await LoadAsync(projectPath, solution, new FileSystem(), cancellationToken);
 
-    public async Task<IEnumerable<Package>> GetPackagesAsync(INugetService nugetService)
+    public async Task<IEnumerable<Package>> GetPackagesAsync(INugetService nugetService,
+        CancellationToken cancellationToken = default)
     {
-        var packages = await ReadProjectAssetsAsync(nugetService);
+        var packages = await ReadProjectAssetsAsync(nugetService, cancellationToken);
         return await FilterOutNotRelatedPackagesAsync(packages);
 
         async Task<IEnumerable<Package>> FilterOutNotRelatedPackagesAsync(IEnumerable<Package> packagesToFilter)
@@ -111,7 +114,8 @@ public class Project
         return csprojXml;
     }
 
-    private async Task<IEnumerable<Package>> ReadProjectAssetsAsync(INugetService nugetService)
+    private async Task<IEnumerable<Package>> ReadProjectAssetsAsync(INugetService nugetService,
+        CancellationToken cancellationToken)
     {
         var projectAssets = await ParseProjectAssetsAsync();
         var packageStore = new PackageStore();
@@ -124,14 +128,15 @@ public class Project
             packageStore.SetDependencies(packageId, dependencies);
         }
 
-        return await packageStore.GetAllAsync(nugetService);
+        return await packageStore.GetAllAsync(nugetService, cancellationToken);
     }
 
     private async Task<Dictionary<string, TargetsEntry>> ParseProjectAssetsAsync()
     {
         var file = FindProjectAssetsFile();
         var stream = _fileSystem.File.OpenRead(file.FullName);
-        var projectAssets = await JsonSerializer.DeserializeAsync(stream, SourceGenerationContext.Default.ProjectAssets);
+        var projectAssets =
+            await JsonSerializer.DeserializeAsync(stream, SourceGenerationContext.Default.ProjectAssets);
         if (projectAssets is not null)
         {
             return projectAssets.Targets.First().Value;

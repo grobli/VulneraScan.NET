@@ -22,14 +22,15 @@ public class PackageStore
         package.MinimalDependencies.AddRange(dependencies);
     }
 
-    public async Task<IEnumerable<Package>> GetAllAsync(INugetService nugetService)
+    public async Task<IEnumerable<Package>> GetAllAsync(INugetService nugetService,
+        CancellationToken cancellationToken = default)
     {
         var packages = _store.Values.ToArray();
         var vulnerabilitiesTasks = new List<Task>();
 
         foreach (var package in packages)
         {
-            vulnerabilitiesTasks.Add(FindVulnerabilitiesAsync(package, nugetService));
+            vulnerabilitiesTasks.Add(FindVulnerabilitiesAsync(package, nugetService, cancellationToken));
             SetupDependencies(package);
         }
 
@@ -40,9 +41,9 @@ public class PackageStore
         return packages;
 
 
-        static async Task FindVulnerabilitiesAsync(Package package, INugetService nugetService)
+        static async Task FindVulnerabilitiesAsync(Package package, INugetService nugetService, CancellationToken ct)
         {
-            var vulnerabilities = await nugetService.FindVulnerabilitiesAsync(package.Id);
+            var vulnerabilities = await nugetService.FindVulnerabilitiesAsync(package.Id, ct);
             package.Vulnerabilities.AddRange(vulnerabilities);
         }
 
