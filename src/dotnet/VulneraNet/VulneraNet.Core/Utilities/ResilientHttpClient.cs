@@ -8,7 +8,7 @@ namespace VulneraNet.Core.Utilities;
 
 public class ResilientHttpClient : IResilientHttpClient
 {
-    public TimeSpan FirstRetryDelay { get; set; } = TimeSpan.FromMilliseconds(500);
+    public TimeSpan FirstRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
     public int MaxRetries { get; set; } = 5;
 
     private readonly HttpClient _httpClient = CreateHttpClient();
@@ -34,7 +34,8 @@ public class ResilientHttpClient : IResilientHttpClient
         throw new ResilientHttpClientException($"HTTP GET: {uri} - Failed after {MaxRetries} retries");
     }
 
-    public async Task<T> GetAsync<T>(Uri uri, JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken = default)
+    public async Task<T> GetAsync<T>(Uri uri, JsonTypeInfo<T> jsonTypeInfo,
+        CancellationToken cancellationToken = default)
     {
         var response = await GetAsync(uri, cancellationToken);
         var content = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -42,8 +43,8 @@ public class ResilientHttpClient : IResilientHttpClient
         return deserialized!;
     }
 
-    private async Task<HttpResponseMessage> MakeGetRequestAsync(Uri uri,
-        CancellationToken cancellationToken = default) => await _httpClient.GetAsync(uri, cancellationToken);
+    private async Task<HttpResponseMessage> MakeGetRequestAsync(Uri uri, CancellationToken cancellationToken) =>
+        await _httpClient.GetAsync(uri, cancellationToken);
 
     private TimeSpan GetDelay(int retry) => FirstRetryDelay * Math.Pow(2, retry);
 

@@ -8,32 +8,19 @@ using VulneraNet.Core.Utilities.Interfaces;
 
 namespace VulneraNet.Core.Services;
 
-public class NugetService : INugetService
+public class NugetService(IResilientHttpClient httpClient) : INugetService
 {
-    private readonly Uri _nugetVulnerabilityIndexUrl;
-    private readonly Uri _nugetIndexUrl;
+    private readonly Uri _nugetVulnerabilityIndexUrl = new("https://api.nuget.org/v3/vulnerabilities/index.json");
+    private readonly Uri _nugetIndexUrl = new("https://api.nuget.org/v3/index.json");
 
-    private readonly IResilientHttpClient _httpClient;
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
 
-    private readonly Task<FrozenDictionary<string, Vulnerability[]>> _vulnerabilityDataTask;
-
-    private NugetService(IResilientHttpClient httpClient, CancellationToken cancellationToken)
-    {
-        _httpClient = httpClient;
-        _nugetVulnerabilityIndexUrl = new Uri("https://api.nuget.org/v3/vulnerabilities/index.json");
-        _nugetIndexUrl = new Uri("https://api.nuget.org/v3/index.json");
-
-        _vulnerabilityDataTask = FetchVulnerabilitiesDataAsync(cancellationToken);
-    }
-
-    public static NugetService Create(IResilientHttpClient httpClient, CancellationToken cancellationToken) =>
-        new(httpClient, cancellationToken);
-
+    private FrozenDictionary<string, Vulnerability[]>? _vulnerabilityData;
 
     public async Task<IEnumerable<Vulnerability>> FindVulnerabilitiesAsync(PackageId packageId,
         CancellationToken cancellationToken = default)
     {
-        var data = await _vulnerabilityDataTask;
+        var data = await GetVulnerabilityDataAsync(cancellationToken);
         return data.TryGetValue(packageId.Name, out var vulnerabilities)
             ? vulnerabilities.Where(v => v.VersionRange.CheckInRange(packageId.Version))
             : [];
@@ -45,9 +32,27 @@ public class NugetService : INugetService
         throw new NotImplementedException();
     }
 
+    private async ValueTask<FrozenDictionary<string, Vulnerability[]>> GetVulnerabilityDataAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_vulnerabilityData is not null) return _vulnerabilityData;
+
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            _vulnerabilityData ??= await FetchVulnerabilitiesDataAsync(cancellationToken);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+
+        return _vulnerabilityData;
+    }
+
     private async Task<VulnerabilitiesIndex> FetchVulnerabilitiesIndexAsync(CancellationToken cancellationToken)
     {
-        var entries = await _httpClient.GetAsync(_nugetVulnerabilityIndexUrl,
+        var entries = await httpClient.GetAsync(_nugetVulnerabilityIndexUrl,
             SourceGenerationContext.Default.VulnerabilitiesIndexEntryArray, cancellationToken);
         VulnerabilitiesIndexEntry? baseEntry = default;
         VulnerabilitiesIndexEntry? updateEntry = default;
@@ -69,11 +74,13 @@ public class NugetService : INugetService
     private async Task<FrozenDictionary<string, Vulnerability[]>> FetchVulnerabilitiesDataAsync(
         CancellationToken cancellationToken)
     {
+        Console.WriteLine("Fetching vulnerabilities data...");
+
         var index = await FetchVulnerabilitiesIndexAsync(cancellationToken);
 
-        var baseDataTask = _httpClient.GetAsync(index.Base.Id,
+        var baseDataTask = httpClient.GetAsync(index.Base.Id,
             SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry, cancellationToken);
-        var updateDataTask = _httpClient.GetAsync(index.Update.Id,
+        var updateDataTask = httpClient.GetAsync(index.Update.Id,
             SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry, cancellationToken);
         await Task.WhenAll(baseDataTask, updateDataTask);
 

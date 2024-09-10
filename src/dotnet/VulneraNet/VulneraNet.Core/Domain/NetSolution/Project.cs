@@ -18,17 +18,23 @@ public class Project
     public bool IsModern { get; private set; }
     public bool IsLegacy => !IsModern;
 
-    public async Task<XmlDocument> GetXmlContentAsync() => await _xmlContentTask;
-
     private readonly IFileSystem _fileSystem;
-    private readonly Task<XmlDocument> _xmlContentTask;
-    private readonly Task<FrozenSet<string>> _packageReferencesTask;
+
+    private XmlDocument _xmlContent = null!;
+    private FrozenSet<string> _packageReferences = null!;
+
+    private Project(string projectPath, Solution solution, IFileSystem fileSystem)
+    {
+        _fileSystem = fileSystem;
+        Solution = solution;
+        File = _fileSystem.FileInfo.New(projectPath);
+    }
 
     public static async Task<Project> LoadAsync(string projectPath, Solution solution, IFileSystem fileSystem,
         CancellationToken cancellationToken = default)
     {
         var project = new Project(projectPath, solution, fileSystem);
-        await project.SetupPropertiesAsync();
+        await project.SetupPropertiesAsync(cancellationToken);
         return project;
     }
 
@@ -40,9 +46,9 @@ public class Project
         CancellationToken cancellationToken = default)
     {
         var packages = await ReadProjectAssetsAsync(nugetService, cancellationToken);
-        return await FilterOutNotRelatedPackagesAsync(packages);
+        return FilterOutNotRelatedPackagesAsync(packages);
 
-        async Task<IEnumerable<Package>> FilterOutNotRelatedPackagesAsync(IEnumerable<Package> packagesToFilter)
+        IEnumerable<Package> FilterOutNotRelatedPackagesAsync(IEnumerable<Package> packagesToFilter)
         {
             if (IsLegacy)
             {
@@ -50,10 +56,9 @@ public class Project
             }
 
             var projectRelatedPackages = new HashSet<Package>();
-            var packageReferences = await _packageReferencesTask;
             foreach (var package in packagesToFilter)
             {
-                package.IsPackageReference = packageReferences.Contains(package.Id.Name);
+                package.IsPackageReference = _packageReferences.Contains(package.Id.Name);
 
                 if (!package.IsPackageReference) continue;
 
@@ -67,24 +72,23 @@ public class Project
 
     public override string ToString() => File.FullName;
 
-    private Project(string projectPath, Solution solution, IFileSystem fileSystem)
+    private bool IsSdkStyle()
     {
-        _fileSystem = fileSystem;
-        Solution = solution;
-        File = _fileSystem.FileInfo.New(projectPath);
-        _xmlContentTask = LoadXmlAsync();
-        _packageReferencesTask = ReadPackageReferencesAsync();
+        var projectNode = _xmlContent.SelectSingleNode("./Project");
+        return projectNode?.Attributes?["Sdk"] is not null;
     }
 
-    private async Task SetupPropertiesAsync()
+    private async Task SetupPropertiesAsync(CancellationToken cancellationToken)
     {
-        IsModern = await IsSdkStyleAsync();
+        _xmlContent = await LoadXmlAsync(cancellationToken);
+
+        IsModern = IsSdkStyle();
+        _packageReferences = ReadPackageReferences();
     }
 
-    private async Task<FrozenSet<string>> ReadPackageReferencesAsync()
+    private FrozenSet<string> ReadPackageReferences()
     {
-        var xml = await GetXmlContentAsync();
-        var packageReferences = xml.SelectNodes(".//PackageReference");
+        var packageReferences = _xmlContent.SelectNodes(".//PackageReference");
         if (packageReferences is null)
         {
             return FrozenSet<string>.Empty;
@@ -99,17 +103,10 @@ public class Project
         return prefSet.ToFrozenSet();
     }
 
-    private async Task<bool> IsSdkStyleAsync()
-    {
-        var xml = await GetXmlContentAsync();
-        var projectNode = xml.SelectSingleNode("./Project");
-        return projectNode?.Attributes?["Sdk"] is not null;
-    }
-
-    private async Task<XmlDocument> LoadXmlAsync()
+    private async Task<XmlDocument> LoadXmlAsync(CancellationToken token)
     {
         var csprojXml = new XmlDocument();
-        var content = await _fileSystem.File.ReadAllTextAsync(File.FullName);
+        var content = await _fileSystem.File.ReadAllTextAsync(File.FullName, token);
         csprojXml.LoadXml(content);
         return csprojXml;
     }

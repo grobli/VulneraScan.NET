@@ -10,12 +10,7 @@ using VulneraNet.Core.Utilities.Interfaces;
 
 var builder = CoconaLiteApp.CreateBuilder();
 builder.Services.AddSingleton<IResilientHttpClient, ResilientHttpClient>();
-builder.Services.AddSingleton<INugetService>(provider =>
-{
-    var httpClient = provider.GetRequiredService<IResilientHttpClient>();
-    var context = provider.GetRequiredService<CoconaAppContext>();
-    return NugetService.Create(httpClient, context.CancellationToken);
-});
+builder.Services.AddSingleton<INugetService, NugetService>();
 
 var app = builder.Build();
 
@@ -38,25 +33,21 @@ app.AddCommand("solution",
         {
             if (isRecursive)
             {
-                var solutions = Directory.EnumerateFiles(solutionPath, "*.sln", SearchOption.AllDirectories)
-                    .Select(s => new Solution(s));
+                var solutionTasks = Directory.EnumerateFiles(solutionPath, "*.sln", SearchOption.AllDirectories)
+                    .Select(s => Solution.LoadAsync(s, context.CancellationToken));
+                var solutions = await Task.WhenAll(solutionTasks);
                 var jobs = solutions.Select(s => Job(s, context.CancellationToken)).ToArray();
                 await Task.WhenAll(jobs);
                 return;
             }
 
-            await Job(new Solution(solutionPath), context.CancellationToken);
+            var solution = await Solution.LoadAsync(solutionPath, context.CancellationToken);
+            await Job(solution, context.CancellationToken);
             return;
 
-            async Task Job(Solution solution, CancellationToken cancellationToken)
+            async Task Job(Solution sln, CancellationToken cancellationToken)
             {
-                var tasks = new List<Task>();
-
-                await foreach (var project in solution.Projects)
-                {
-                    tasks.Add(PrintPackages(project, cancellationToken));
-                }
-
+                var tasks = sln.Projects.Select(project => PrintPackages(project, cancellationToken));
                 await Task.WhenAll(tasks);
             }
 
@@ -72,13 +63,13 @@ app.AddCommand("solution",
                 Console.WriteLine();
             }
         })
-    .WithFilter(async (context, @delegate) =>
+    .WithFilter(async (context, next) =>
     {
         try
         {
-            return await @delegate(context);
+            return await next(context);
         }
-        catch (TaskCanceledException _)
+        catch (TaskCanceledException)
         {
             Console.WriteLine("Operation cancelled");
             return 1;
