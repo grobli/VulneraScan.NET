@@ -42,7 +42,8 @@ app.AddCommand("solution",
                 var solutions = await Task.WhenAll(solutionTasks);
                 var jobs = solutions.Select(s => Job(s, context.CancellationToken)).ToArray();
                 await Task.WhenAll(jobs);
-                watch.logger.LogInformation($"Execution time was: {watch.Elapsed.TotalSeconds:F} seconds.");
+                watch.Stop();
+                logger.LogInformation($"Execution time was: {watch.Elapsed.TotalSeconds:F} seconds.");
                 return;
             }
 
