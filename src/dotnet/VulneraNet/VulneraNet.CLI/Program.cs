@@ -1,4 +1,5 @@
-﻿using Cocona;
+﻿using System.Diagnostics;
+using Cocona;
 using Cocona.Lite;
 using VulneraNet.Core.Domain;
 using VulneraNet.Core.Domain.NetSolution;
@@ -29,8 +30,11 @@ app.AddCommand("scan", async (CoconaAppContext context, [Argument] string packag
 app.AddCommand("solution",
         async (CoconaAppContext context,
             [Argument] string solutionPath, [Option("recurse", ['r'])] bool isRecursive,
-            INugetService nugetService) =>
+            INugetService nugetService, ILogger logger) =>
         {
+            var watch = new Stopwatch();
+            watch.Start();
+            
             if (isRecursive)
             {
                 var solutionTasks = Directory.EnumerateFiles(solutionPath, "*.sln", SearchOption.AllDirectories)
@@ -43,6 +47,8 @@ app.AddCommand("solution",
 
             var solution = await Solution.LoadAsync(solutionPath, context.CancellationToken);
             await Job(solution, context.CancellationToken);
+            watch.Stop();
+            logger.LogInformation($"Execution time was: {watch.Elapsed.TotalSeconds:F} seconds.");
             return;
 
             async Task Job(Solution sln, CancellationToken cancellationToken)
