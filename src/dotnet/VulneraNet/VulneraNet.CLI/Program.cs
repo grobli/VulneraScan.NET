@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Cocona;
 using Cocona.Lite;
 using VulneraNet.Core.Domain;
@@ -42,6 +42,7 @@ app.AddCommand("solution",
                 var solutions = await Task.WhenAll(solutionTasks);
                 var jobs = solutions.Select(s => Job(s, context.CancellationToken)).ToArray();
                 await Task.WhenAll(jobs);
+                watch.logger.LogInformation($"Execution time was: {watch.Elapsed.TotalSeconds:F} seconds.");
                 return;
             }
 
