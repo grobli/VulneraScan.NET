@@ -1,6 +1,6 @@
 ﻿using System.Text.Json.Serialization.Metadata;
 
-namespace VulneraNet.Core.Utilities.Interfaces;
+namespace VulneraNet.Core.Utilities.Http;
 
 public interface IResilientHttpClient
 {

@@ -4,13 +4,13 @@ using VulneraNet.Core.Domain;
 using VulneraNet.Core.Domain.NetSolution;
 using VulneraNet.Core.Services;
 using VulneraNet.Core.Services.Interfaces;
-using VulneraNet.Core.Utilities;
-using VulneraNet.Core.Utilities.Interfaces;
+using VulneraNet.Core.Utilities.Http;
+using VulneraNet.Core.Utilities.Logging;
 
-
-var builder = CoconaLiteApp.CreateBuilder();
+var builder = CoconaLiteApp.CreateBuilder(args, options => options.EnableShellCompletionSupport = true);
 builder.Services.AddSingleton<IResilientHttpClient, ResilientHttpClient>();
 builder.Services.AddSingleton<INugetService, NugetService>();
+builder.Services.AddSingleton<ILogger, Logger>();
 
 var app = builder.Build();
 

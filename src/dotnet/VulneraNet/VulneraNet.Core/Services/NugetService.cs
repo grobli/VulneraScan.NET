@@ -4,11 +4,12 @@ using VulneraNet.Core.Domain.NuGet.Vulnerabilities;
 using VulneraNet.Core.Json;
 using VulneraNet.Core.Mappers;
 using VulneraNet.Core.Services.Interfaces;
-using VulneraNet.Core.Utilities.Interfaces;
+using VulneraNet.Core.Utilities.Http;
+using VulneraNet.Core.Utilities.Logging;
 
 namespace VulneraNet.Core.Services;
 
-public class NugetService(IResilientHttpClient httpClient) : INugetService
+public class NugetService(IResilientHttpClient httpClient, ILogger logger) : INugetService
 {
     private readonly Uri _nugetVulnerabilityIndexUrl = new("https://api.nuget.org/v3/vulnerabilities/index.json");
     private readonly Uri _nugetIndexUrl = new("https://api.nuget.org/v3/index.json");
@@ -74,7 +75,7 @@ public class NugetService(IResilientHttpClient httpClient) : INugetService
     private async Task<FrozenDictionary<string, Vulnerability[]>> FetchVulnerabilitiesDataAsync(
         CancellationToken cancellationToken)
     {
-        Console.WriteLine("Fetching vulnerabilities data...");
+        logger.LogInformation<NugetService>($"Fetching vulnerabilities data from {_nugetIndexUrl}.");
 
         var index = await FetchVulnerabilitiesIndexAsync(cancellationToken);
 

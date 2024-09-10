@@ -2,11 +2,11 @@
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using VulneraNet.Core.Exceptions;
-using VulneraNet.Core.Utilities.Interfaces;
+using VulneraNet.Core.Utilities.Logging;
 
-namespace VulneraNet.Core.Utilities;
+namespace VulneraNet.Core.Utilities.Http;
 
-public class ResilientHttpClient : IResilientHttpClient
+public class ResilientHttpClient(ILogger logger) : IResilientHttpClient
 {
     public TimeSpan FirstRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
     public int MaxRetries { get; set; } = 5;
@@ -20,13 +20,13 @@ public class ResilientHttpClient : IResilientHttpClient
         {
             try
             {
+                logger.LogDebug<ResilientHttpClient>($"GET {uri}");
                 return await MakeGetRequestAsync(uri, cancellationToken);
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException e)
             {
                 var delay = GetDelay(retry++);
-                await Console.Error.WriteLineAsync(
-                    $"HTTP GET: {uri} - Error - Retry in {delay.Seconds} seconds. Retry {retry} out of {MaxRetries}");
+                logger.LogError<ResilientHttpClient>($"GET {uri} failed. Retrying in {delay} ms.", e);
                 await Task.Delay(delay, cancellationToken);
             }
         }
