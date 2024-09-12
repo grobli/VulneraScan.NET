@@ -1350,7 +1350,7 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit | Select-Object -Property SolutionName, SolutionPath | Format-Table
     Write-Output 'Vulnerability Count:'
     $SolutionAudit.VulnerabilityCount | Format-List
-    $SolutionAudit.Projects | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
+    $SolutionAudit.Projects.Values | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
     Write-Output "======= All Vulnerabilities Details ".PadRight(105, '=')
     Write-Output ''
     $SolutionAudit.VulnerablePackages | ForEach-Object { Format-PackageAuditAsText $_ }
@@ -1380,9 +1380,9 @@ function Format-PackageAuditAsText([PackageAudit]$PackageAudit) {
 function Get-CpuCount {
     #if using Powershell Core on unix
     if ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.Platform -eq 'Unix') {
-      return [int](nproc --all)
+        return [int](nproc --all)
     }
-     # else if using windows powershell or powershell core on windows
+    # else if using windows powershell or powershell core on windows
     return (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
 }
 
