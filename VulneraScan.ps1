@@ -467,10 +467,7 @@ class Project {
 
     [string]GetTargetFramework() {
         if ($this.IsLegacy) {
-            $targetFrameworkVersion = $this.CsprojContent `
-            | Select-Xml -XPath './/TargetFrameworkVersion' -ErrorAction SilentlyContinue `
-            | Select-Object -ExpandProperty Node
-            return $targetFrameworkVersion.InnerText
+            return $this.CsprojContent.GetElementsByTagName('TargetFrameworkVersion')[0].InnerText
         }
         $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
         $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
