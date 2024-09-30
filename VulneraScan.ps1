@@ -163,7 +163,7 @@ class SolutionAudit {
 
         $this.Tools = [CommandToolsSolution]::new($this.Projects.Values.Tools)
         
-        [string[]]$frameworks = @($audits.TargetFramework) + @($legacyAudits.TargetFramework) | Where-Object { -not [string]::IsNullOrEmpty($_) }
+        [string[]]$frameworks = $audits.TargetFrameworks + $legacyAudits.TargetFrameworks | Where-Object { -not [string]::IsNullOrEmpty($_) }
         $this.TargetFrameworks = [System.Collections.Generic.HashSet[string]]::new($frameworks)
     }
 
@@ -210,7 +210,7 @@ class ProjectAudit {
     [Package[]]$TransitiveOverrides
     [string]$ProjectPath
     [string]$ProjectType
-    [string]$TargetFramework
+    [string[]]$TargetFrameworks
 
     hidden [CommandToolsProject]$Tools
     
@@ -239,7 +239,7 @@ class ProjectAudit {
             $this.TransitiveOverrides = $packages | Where-Object { $_.IsPackageReference -and $_.IsTransitive() }  
         }
         $this.Tools = [CommandToolsProject]::new($project, $this)
-        $this.TargetFramework = $project.GetTargetFramework()
+        $this.TargetFrameworks = $project.GetTargetFrameworks()
     }
 
     [CommandToolsProject]GetTools() {
@@ -465,15 +465,16 @@ class Project {
         $this.PackageReferences = $this.ReadPackageReferences()
     }
 
-    [string]GetTargetFramework() {
+    [string[]]GetTargetFrameworks() {
         if ($this.IsLegacy) {
-            return $this.CsprojContent.GetElementsByTagName('TargetFrameworkVersion')[0].InnerText
+            $tfv = $this.CsprojContent.GetElementsByTagName('TargetFrameworkVersion')[0].InnerText
+            return $tfv
         }
         $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
         $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
         $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-        $targetVersion = $projectAssetsParsed.targets[0].PSObject.Properties.Name
-        return $targetVersion
+        $targetVersions = $projectAssetsParsed.targets.PSObject.Properties.Name
+        return $targetVersions
     }
 
     [Package[]]GetPackages() {
