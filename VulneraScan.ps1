@@ -149,7 +149,7 @@ class SolutionAudit {
     [System.Collections.Generic.SortedDictionary[string, ProjectAudit]]$Projects
     [PackageAudit[]]$VulnerablePackages
     [string]$SolutionPath
-    [string]$TargetFrameworks
+    [string[]]$TargetFrameworks
 
     hidden [CommandToolsSolution]$Tools
     
@@ -163,9 +163,8 @@ class SolutionAudit {
 
         $this.Tools = [CommandToolsSolution]::new($this.Projects.Values.Tools)
         
-        [string[]]$frameworks = $audits.TargetFramework
-        $uniqueFrameworks = [System.Collections.Generic.HashSet[string]]::new($frameworks)
-        $this.TargetFrameworks = [string]::Join(", ", $uniqueFrameworks)
+        [string[]]$frameworks = @($audits.TargetFramework) + @($legacyAudits.TargetFramework) | Where-Object { -not [string]::IsNullOrEmpty($_) }
+        $this.TargetFrameworks = [System.Collections.Generic.HashSet[string]]::new($frameworks)
     }
 
     [CommandToolsSolution]GetTools() {
