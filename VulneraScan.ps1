@@ -149,6 +149,7 @@ class SolutionAudit {
     [System.Collections.Generic.SortedDictionary[string, ProjectAudit]]$Projects
     [PackageAudit[]]$VulnerablePackages
     [string]$SolutionPath
+    [string]$TargetFrameworks
 
     hidden [CommandToolsSolution]$Tools
     
@@ -161,6 +162,10 @@ class SolutionAudit {
         $this.VulnerablePackages = $this.FindUniqueVulnerablePackages()
 
         $this.Tools = [CommandToolsSolution]::new($this.Projects.Values.Tools)
+        
+        [string[]]$frameworks = $audits.TargetFramework
+        $uniqueFrameworks = [System.Collections.Generic.HashSet[string]]::new($frameworks)
+        $this.TargetFrameworks = [string]::Join(", ", $uniqueFrameworks)
     }
 
     [CommandToolsSolution]GetTools() {
@@ -206,6 +211,7 @@ class ProjectAudit {
     [Package[]]$TransitiveOverrides
     [string]$ProjectPath
     [string]$ProjectType
+    [string]$TargetFramework
 
     hidden [CommandToolsProject]$Tools
     
@@ -234,6 +240,7 @@ class ProjectAudit {
             $this.TransitiveOverrides = $packages | Where-Object { $_.IsPackageReference -and $_.IsTransitive() }  
         }
         $this.Tools = [CommandToolsProject]::new($project, $this)
+        $this.TargetFramework = $project.GetTargetFramework()
     }
 
     [CommandToolsProject]GetTools() {
@@ -457,6 +464,20 @@ class Project {
         $this.CsprojContent = [System.IO.File]::ReadAllText($this.File.FullName)
         $this.IsLegacy = !$this.IsSdkStyle()
         $this.PackageReferences = $this.ReadPackageReferences()
+    }
+
+    [string]GetTargetFramework() {
+        if ($this.IsLegacy) {
+            $targetFrameworkVersion = $this.CsprojContent `
+            | Select-Xml -XPath './/TargetFrameworkVersion' -ErrorAction SilentlyContinue `
+            | Select-Object -ExpandProperty Node
+            return $targetFrameworkVersion.InnerText
+        }
+        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
+        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
+        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+        $targetVersion = $projectAssetsParsed.targets[0].PSObject.Properties.Name
+        return $targetVersion
     }
 
     [Package[]]GetPackages() {
