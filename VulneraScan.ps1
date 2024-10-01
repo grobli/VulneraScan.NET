@@ -15,7 +15,7 @@ param (
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$BreakOnSeverity = 'Low',
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType = 'All',
     [Parameter()][switch]$FindPatchedOnline,
-    [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$ProjectsToScan = 'All',
+    [Parameter()][ValidateSet('All', 'Legacy', 'Modern', 'None')]$ProjectsToScan = 'All',
     [Parameter()][switch]$Restore,
     [Parameter()][ValidateSet('OnDemand', 'Force')]$RestoreActionPreference = 'OnDemand',
     [Parameter()][ValidateSet('Dotnet', 'Nuget')]$RestoreToolPreference = 'Dotnet',
@@ -752,9 +752,13 @@ class PackageStore {
         $packages = $this.Store.Values
         foreach ($package in $packages) {
             $this.SetupDependencies($package)
-            $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
+            if ($null -ne $this.NugetService) {
+                $package.Vulnerabilities = $this.NugetService.FindVulnerabilities($package.Id)
+            }
         }
-        $this.PropagateVulnerableDependenciesFlag()
+        if ($null -ne $this.NugetService) {
+            $this.PropagateVulnerableDependenciesFlag()
+        }
         return $packages
     }
 
@@ -942,6 +946,7 @@ enum ProjectScanMode {
     All
     Modern
     Legacy
+    None
 }
 
 class VulnerabilityAuditorSettings {
@@ -970,7 +975,7 @@ class VulnerabilityAuditor {
 
     [SolutionAudit]RunSolutionAudit([Solution]$solution) {
         $scanMode = $this.Settings.ScanMode
-        if ($scanMode -eq [ProjectScanMode]::All) {
+        if ($scanMode -eq [ProjectScanMode]::All -or $scanMode -eq [ProjectScanMode]::None) {
             return $this.RunAllSolutionAudit($solution)
         }
         if ($scanMode -eq [ProjectScanMode]::Modern) {
@@ -1490,9 +1495,13 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solutions) {
     if ($Restore) {
         Invoke-ParallelRestore $Solutions
     }
-    $nugetService = [NugetService]::new()
-    $auditor = [VulnerabilityAuditor]::new($nugetService)
 
+    $nugetService = $null
+    if ($ProjectsToScan -ne 'None') {
+        $nugetService = [NugetService]::new()
+    }
+    $auditor = [VulnerabilityAuditor]::new($nugetService)
+    
     $auditor.Settings.FindPatchedOnline = $FindPatchedOnline
     $auditor.Settings.IncludeDependencies = !$Minimal
     $auditor.Settings.ScanMode = $ProjectsToScan
