@@ -455,6 +455,7 @@ class Project {
     [xml]$CsprojContent
     [System.Collections.Generic.HashSet[string]]$PackageReferences
     hidden [System.IO.FileInfo]$PackagesConfigFile
+    hidden [PSCustomObject]$ProjectAssetsContent
 
     Project([string]$projectPath, [string]$solutionPath) {
         $this.File = $projectPath
@@ -463,18 +464,7 @@ class Project {
         $this.CsprojContent = [System.IO.File]::ReadAllText($this.File.FullName)
         $this.IsLegacy = !$this.IsSdkStyle()
         $this.PackageReferences = $this.ReadPackageReferences()
-    }
-
-    [string[]]GetTargetFrameworks() {
-        if ($this.IsLegacy) {
-            $tfv = $this.CsprojContent.GetElementsByTagName('TargetFrameworkVersion')[0].InnerText
-            return $tfv
-        }
-        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
-        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
-        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-        $targetVersions = $projectAssetsParsed.targets.PSObject.Properties.Name
-        return $targetVersions
+        $this.ProjectAssetsContent = $this.LoadProjectAssetsJson()
     }
 
     [Package[]]GetPackages() {
@@ -488,6 +478,14 @@ class Project {
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig($packageStore) } 
         else { $this.ReadProjectAssetsJson($packageStore) }
         return $this.FilterOutNotRelatedPackages($packages)
+    }
+
+    [string[]]GetTargetFrameworks() {
+        if ($this.IsLegacy) {
+            $tfv = $this.CsprojContent.GetElementsByTagName('TargetFrameworkVersion')[0].InnerText
+            return $tfv
+        }
+        return $this.ProjectAssetsContent.targets.PSObject.Properties.Name
     }
 
     hidden [Package[]]FilterOutNotRelatedPackages([Package[]]$packages) {
@@ -602,14 +600,21 @@ class Project {
     }
 
     hidden [PSCustomObject[]]ParseProjectAssetsJson() {
-        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
-        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
-        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
-        $targets = @($projectAssetsParsed.targets.PSObject.Properties)[0].Value.PSObject.Properties
+        $targets = @($this.ProjectAssetsContent.targets.PSObject.Properties)[0].Value.PSObject.Properties
         $entries = $targets `
         | Select-Object -Property Name, Value `
         | Where-Object { $_.Value.type -eq 'package' }
         return $entries
+    }
+
+    hidden [PSCustomObject]LoadProjectAssetsJson() {
+        if ($this.IsLegacy) {
+            return $null
+        }
+        $projectAssetsJsonFile = $this.GetProjectAssetsJsonFile()
+        $projectAssetsText = [System.IO.File]::ReadAllText($projectAssetsJsonFile.FullName) 
+        $projectAssetsParsed = $projectAssetsText | ConvertFrom-Json
+        return $projectAssetsParsed
     }
 
     hidden [System.IO.FileInfo]GetPackagesConfig() {
@@ -1022,6 +1027,11 @@ class VulnerabilityAuditor {
         if ($this.Settings.IncludeDependencies) {
             [Package[]]$packages = $project.GetPackages($this.NugetService)
             [PackageAudit[]]$audits = @()
+
+            if ($null -eq $this.NugetService) {
+                return [ProjectAudit]::new($project, $audits, $packages)
+            }
+
             foreach ($package in $packages) {
                 if ($package.IsVulnerable() -or $package.HasVulnerableDependencies) {
                     $audit = $this.CreatePackageAudit($package)
@@ -1036,6 +1046,11 @@ class VulnerabilityAuditor {
     hidden [ProjectAudit]RunProjectAuditNoDeps([Project]$project) {
         [Package[]]$packages = $project.GetPackages()
         [PackageAudit[]]$audits = @()
+
+        if ($null -eq $this.NugetService) {
+            return [ProjectAudit]::new($project, $audits, $packages)
+        }
+
         foreach ($package in $packages) {
             if ($this.AuditNoVulnerableSet.Contains($package.Id)) {
                 continue
@@ -1055,7 +1070,6 @@ class VulnerabilityAuditor {
             }
         }
         return [ProjectAudit]::new($project, $audits, $packages)
-
     }
 
     [PackageAudit]CreatePackageAudit([Package]$package) {
