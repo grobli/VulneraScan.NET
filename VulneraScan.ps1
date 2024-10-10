@@ -8,7 +8,7 @@
 #region Parameters
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true)][string]$SolutionPath,
+    [Parameter(Position = 0)][string]$SolutionPath = $(Get-Location),
     [Parameter()][ValidateSet('Json', 'Text')]$Format,
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
@@ -24,6 +24,9 @@ param (
     [Parameter()][switch]$Minimal
 )
 #endregion
+
+[System.IO.Directory]::SetCurrentDirectory((Get-Location).Path)
+Write-Verbose "Current working directory: $([System.IO.Directory]::GetCurrentDirectory())"
 
 #region GlobalVariables
 [bool]$IsNugetAppAvailable = $true
