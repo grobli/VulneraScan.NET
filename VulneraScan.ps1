@@ -14,7 +14,6 @@ param (
     [Parameter()][switch]$BuildBreaker,
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$BreakOnSeverity = 'Low',
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern')]$BreakOnProjectType = 'All',
-    [Parameter()][switch]$FindPatchedOnline,
     [Parameter()][ValidateSet('All', 'Legacy', 'Modern', 'None')]$ProjectsToScan = 'All',
     [Parameter()][switch]$Restore,
     [Parameter()][ValidateSet('OnDemand', 'Force')]$RestoreActionPreference = 'OnDemand',
@@ -386,7 +385,7 @@ class SolutionAuditVulnerabilityCount {
         $this.All = [VulnerabilityCount]::SumCounts($allCounts)
     }
 
-    static[SolutionAuditVulnerabilityCount]SumCounts([SolutionAuditVulnerabilityCount[]]$counts) {
+    static [SolutionAuditVulnerabilityCount]SumCounts([SolutionAuditVulnerabilityCount[]]$counts) {
         $count = [SolutionAuditVulnerabilityCount]::new()
         $allCounts = $counts | Select-Object -ExpandProperty All
         $legacyCounts = $counts | Select-Object -ExpandProperty Legacy
@@ -458,7 +457,8 @@ class Project {
     [xml]$CsprojContent
     [System.Collections.Generic.HashSet[string]]$PackageReferences
     hidden [System.IO.FileInfo]$PackagesConfigFile
-    hidden [PSCustomObject]$ProjectAssetsContent
+
+    hidden [PSCustomObject]$_projectAssetsContent = $null
 
     Project([string]$projectPath, [string]$solutionPath) {
         $this.File = $projectPath
@@ -467,7 +467,6 @@ class Project {
         $this.CsprojContent = [System.IO.File]::ReadAllText($this.File.FullName)
         $this.IsLegacy = !$this.IsSdkStyle()
         $this.PackageReferences = $this.ReadPackageReferences()
-        $this.ProjectAssetsContent = $this.LoadProjectAssetsJson()
     }
 
     [Package[]]GetPackages() {
@@ -488,7 +487,18 @@ class Project {
             $tfv = $this.CsprojContent.GetElementsByTagName('TargetFrameworkVersion')[0].InnerText
             return $tfv
         }
-        return $this.ProjectAssetsContent.targets.PSObject.Properties.Name
+        return $this.GetProjectAssetsContent().targets.PSObject.Properties.Name
+    }
+
+    hidden [PSCustomObject]GetProjectAssetsContent() {
+        if ($this.IsLegacy) {
+            return $null
+        }
+        if ($this._projectAssetsContent) {
+            return $this._projectAssetsContent
+        } 
+        $this._projectAssetsContent = $this.LoadProjectAssetsJson()
+        return $this._projectAssetsContent
     }
 
     hidden [Package[]]FilterOutNotRelatedPackages([Package[]]$packages) {
@@ -603,7 +613,7 @@ class Project {
     }
 
     hidden [PSCustomObject[]]ParseProjectAssetsJson() {
-        $targets = @($this.ProjectAssetsContent.targets.PSObject.Properties)[0].Value.PSObject.Properties
+        $targets = @($this.GetProjectAssetsContent().targets.PSObject.Properties)[0].Value.PSObject.Properties
         $entries = $targets `
         | Select-Object -Property Name, Value `
         | Where-Object { $_.Value.type -eq 'package' }
@@ -958,7 +968,6 @@ enum ProjectScanMode {
 }
 
 class VulnerabilityAuditorSettings {
-    [bool]$FindPatchedOnline = $false
     [bool]$IncludeDependencies = $true
     [ProjectScanMode]$ScanMode = [ProjectScanMode]::All
 
@@ -1077,7 +1086,7 @@ class VulnerabilityAuditor {
 
     [PackageAudit]CreatePackageAudit([Package]$package) {
         $audit = [PackageAudit]::new($package)
-        if ($this.Settings.FindPatchedOnline -and $package.IsVulnerable() -and -not $audit.FirstPatchedVersion) {
+        if ($package.IsVulnerable() -and -not $audit.FirstPatchedVersion) {
             $patchedVersion = $this.NugetService.FindFirstPatchedVersion($package.Id)
             $audit.FirstPatchedVersion = $patchedVersion
         }
@@ -1519,7 +1528,6 @@ function Invoke-SolutionVulnerabilityScan([Solution[]]$Solutions) {
     }
     $auditor = [VulnerabilityAuditor]::new($nugetService)
     
-    $auditor.Settings.FindPatchedOnline = $FindPatchedOnline
     $auditor.Settings.IncludeDependencies = !$Minimal
     $auditor.Settings.ScanMode = $ProjectsToScan
 
