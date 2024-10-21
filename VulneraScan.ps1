@@ -835,6 +835,7 @@ class ResilientHttpClient {
     }
 
     hidden static [PSCustomObject]MakeGetRequest([uri]$url) {
+        Write-Verbose "Fetching data from: $url"
         return Invoke-RestMethod -Method Get -Uri $url -UseBasicParsing -ErrorAction Stop
     }
 
