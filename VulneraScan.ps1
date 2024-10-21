@@ -821,9 +821,13 @@ class ResilientHttpClient {
     static [PSCustomObject]Get([uri]$url) {
         $retry = 0
         $maxRetryCount = [ResilientHttpClient]::MaxRetries
+        $startTime = Get-Date
         while ($retry -lt $maxRetryCount) {
             try {
-                return [ResilientHttpClient]::MakeGetRequest($url)
+                $response = [ResilientHttpClient]::MakeGetRequest($url)
+                $requestTime = New-TimeSpan -Start $startTime -End (Get-Date)
+                Write-Verbose "Response received in: $($requestTime.Milliseconds) ms"
+                return $response
             }
             catch {
                 $delay = [ResilientHttpClient]::GetDelay($retry++)
