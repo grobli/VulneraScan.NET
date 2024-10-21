@@ -851,14 +851,16 @@ class NugetService {
     hidden [uri]$NugetMetadataUrl
     hidden [System.Collections.Generic.Dictionary[string, Vulnerability[]]]$Base
     hidden [System.Collections.Generic.Dictionary[string, Vulnerability[]]]$Update
-    hidden [System.Collections.Generic.Dictionary[string, System.Object]]$Metadata
+    hidden [System.Collections.Generic.Dictionary[string, System.Object]]$MetadataRootCache
+    hidden [System.Collections.Generic.Dictionary[string, System.Object]]$CatalogPageCache
 
     hidden static [string]$NugetMetadataType = 'RegistrationsBaseUrl/3.6.0'
 
     NugetService() {
         $this.NugetVulnerabilityIndexUrl = 'https://api.nuget.org/v3/vulnerabilities/index.json'
         $this.NugetIndexUrl = 'https://api.nuget.org/v3/index.json'
-        $this.Metadata = [System.Collections.Generic.Dictionary[string, System.Object]]::new()
+        $this.MetadataRootCache = [System.Collections.Generic.Dictionary[string, System.Object]]::new()
+        $this.CatalogPageCache = [System.Collections.Generic.Dictionary[string, System.Object]]::new()
 
         $index = $this.FetchNugetVulnerabilityIndex()
         $this.Base = $this.FetchVulnerabilityData($index.Base)
@@ -873,7 +875,7 @@ class NugetService {
     }
 
     [version]FindFirstPatchedVersion([PackageId]$package) {
-        $data = $this.GetMetadata($package)
+        $data = $this.GetMetadataCatalogRoot($package)
         [System.Object[]]$registrationPages = @()
         foreach ($page in $data.items) {
             $vrangeString = '[' + $page.lower + ', ' + $page.upper + ']'
@@ -882,18 +884,24 @@ class NugetService {
                 $registrationPages += $page
             }
         }
-        [string[]]$entries = $registrationPages.items.catalogEntry `
-        | Where-Object { 
-            -not $_.vulnerabilities -and $_.version -gt $package.Version.ToString() `
-                -and -not $_.version.Contains('-')
-        } `
-        | Select-Object -ExpandProperty version `
-        | Sort-Object
 
-        if (!$entries) {
-            return $null
+        foreach ($page in $registrationPages) {
+            $catalogUrl = $page.'@id'
+            $catalog = $this.GetCatalogPage($catalogUrl)
+
+            [string[]]$entries = $catalog.items.catalogEntry `
+            | Where-Object { 
+                -not $_.vulnerabilities -and $_.version -gt $package.Version.ToString() `
+                    -and -not $_.version.Contains('-')
+            } `
+            | Select-Object -ExpandProperty version `
+            | Sort-Object
+
+            if ($entries) {
+                return [VersionConverter]::Convert($entries[0])
+            }
         }
-        return [VersionConverter]::Convert($entries[0])
+        return $null      
     }
 
     hidden [string]FetchNugetMetadataUrl() {
@@ -920,16 +928,25 @@ class NugetService {
         return $index
     }
 
-    hidden [System.Object]GetMetadata([PackageId]$package) {
-        if ($this.Metadata.ContainsKey($package.Name)) {
-            return $this.Metadata[$package.Name]
+    hidden [System.Object]GetMetadataCatalogRoot([PackageId]$package) {
+        if ($this.MetadataRootCache.ContainsKey($package.Name)) {
+            return $this.MetadataRootCache[$package.Name]
         }
         if (!$this.NugetMetadataUrl) {
             $this.NugetMetadataUrl = $this.FetchNugetMetadataUrl()
         }
         $url = [uri]::new($this.NugetMetadataUrl, $package.Name + '/index.json')
         $data = [ResilientHttpClient]::Get($url)
-        $this.Metadata[$package.Name] = $data
+        $this.MetadataRootCache[$package.Name] = $data
+        return $data
+    }
+
+    hidden [System.Object]GetCatalogPage([string]$catalogPageUrl) {
+        if ($this.CatalogPageCache.ContainsKey($catalogPageUrl)) {
+            return $this.CatalogPageCache[$catalogPageUrl]
+        }
+        $data = [ResilientHttpClient]::Get($catalogPageUrl)
+        $this.CatalogPageCache[$catalogPageUrl] = $data
         return $data
     }
 
