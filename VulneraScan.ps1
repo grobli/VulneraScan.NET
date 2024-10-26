@@ -1449,6 +1449,7 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
     $SolutionAudit.VulnerabilityCount | Format-List
     $SolutionAudit.Projects.Values | Where-Object { $_ } | ForEach-Object { Format-ProjectAuditAsText $_ }
     if ($SolutionAudit.VulnerabilityCount.All.Total -gt 0) {
+        Write-Output "`n`n"
         Write-Output "======= All Vulnerabilities Details ".PadRight(105, '=')
         Write-Output ''
         $SolutionAudit.VulnerablePackages | ForEach-Object { Format-PackageAuditAsText $_ }
@@ -1459,6 +1460,7 @@ function Format-SolutionAuditAsText([SolutionAudit]$SolutionAudit) {
 #region Format-ProjectAuditAsText
 function Format-ProjectAuditAsText([ProjectAudit]$ProjectAudit) {
     $name = $ProjectAudit.ProjectName
+    Write-Output "`n`n"
     Write-Output "======= $name ".PadRight(105, '=')
     ($ProjectAudit | Select-Object -Property VulnerabilityCount, ProjectType, ProjectPath | Format-List | Out-String).Trim()
     if ($ProjectAudit.VulnerablePackages) {
