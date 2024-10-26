@@ -1233,49 +1233,11 @@ class VersionConverter {
 #region JsonConverter
 class JsonConverter {
     static [string]Convert([SolutionAudit]$solutionAudit) {
-        return [JsonConverter]::Convert($solutionAudit, 3, $false)
-    }
-
-    static [string]Convert([SolutionAudit]$solutionAudit, [int]$vulnerablePackagesDepth, [bool]$vulnerablePackagesAsArray) {
-        $nameJson = $solutionAudit.SolutionName | ConvertTo-Json
-        if ($solutionAudit.Projects.Count -eq 1) {
-            $projectAuditsJson = @($solutionAudit.Projects) | ConvertTo-Json -Depth 1 -WarningAction SilentlyContinue -Compress
-            $projectAuditsJson = '[' + $projectAuditsJson + ']'
-        }
-        else {
-            $projectAuditsJson = @($solutionAudit.Projects) | ConvertTo-Json -Depth 2 -WarningAction SilentlyContinue -Compress
-            if (!$projectAuditsJson) { $projectAuditsJson = '[]' }
-        }
-        if ($vulnerablePackagesAsArray) {
-            $vulnerablePackagesJson = @($solutionAudit.VulnerablePackages.Values) | ConvertTo-Json -Depth $vulnerablePackagesDepth `
-                -WarningAction SilentlyContinue -Compress 
-            if (!$vulnerablePackagesJson) {
-                $vulnerablePackagesJson = '[]'
-            }
-        }
-        else {
-            $vulnerablePackagesJson = @($solutionAudit.VulnerablePackages) | ConvertTo-Json -Depth $vulnerablePackagesDepth `
-                -WarningAction SilentlyContinue -Compress
-        }
-        $vulnerabilityCountJson = $solutionAudit.VulnerabilityCount | ConvertTo-Json -Compress
-        $pathJson = $solutionAudit.SolutionPath | ConvertTo-Json
-        $json = '{' + '"SolutionName":' + $nameJson + ',"VulnerabilityCount":' + $vulnerabilityCountJson + `
-            ',"Projects":' + $projectAuditsJson + ',"SolutionPath":' + $pathJson + ',"VulnerablePackages":' + `
-            $vulnerablePackagesJson + '}'
-        return $json
+        return $solutionAudit | ConvertTo-Json -Depth 3 -Compress -WarningAction SilentlyContinue
     }
 
     static [string]Convert([SolutionAuditPlural]$solutionAuditPlural) {
-        $solutionAuditJsons = $solutionAuditPlural.Solutions | ForEach-Object { 
-            [JsonConverter]::Convert($_, 1, $true)
-        }
-        $solutionAuditJsons = '[' + [string]::Join(',', $solutionAuditJsons) + ']'
-        $vulnerablePackagesJson = $solutionAuditPlural.VulnerablePackages | ConvertTo-Json -Depth 3 -WarningAction SilentlyContinue `
-            -Compress
-        $vulnerabilityCountJson = $solutionAuditPlural.VulnerabilityCount | ConvertTo-Json -Compress
-        $json = '{' + '"Solutions":' + $solutionAuditJsons + ',"VulnerabilityCount":' + $vulnerabilityCountJson + `
-            ',"VulnerablePackages":' + $vulnerablePackagesJson + '}'
-        return $json
+        return $solutionAuditPlural | ConvertTo-Json -Depth 4 -Compress -WarningAction SilentlyContinue
     }
 }
 #endregion
