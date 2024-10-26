@@ -498,7 +498,7 @@ class Project {
     [Package[]]GetPackages() {
         [Package[]]$packages = if ($this.IsLegacy) { $this.ReadPackagesConfig() } 
         else { $this.ReadProjectAssetsJson() }
-        return $this.FilterOutNotRelatedPackages($packages)
+        return $packages
     }
 
     [Package[]]GetPackages([NugetService]$nugetService) {
