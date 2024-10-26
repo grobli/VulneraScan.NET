@@ -35,7 +35,7 @@ Project repository: https://github.com/grobli/VulneraScan.NET
 [CmdletBinding()]
 param (
     [Parameter(Position = 0)][string]$SolutionPath = $(Get-Location),
-    [Parameter()][ValidateSet('Json', 'Text')]$Format,
+    [Parameter()][ValidateSet('Json', 'Text', 'Default')]$Format = 'Default',
     [Parameter()][switch]$Recurse,
     [Parameter()][switch]$BuildBreaker,
     [Parameter()][ValidateSet('Low', 'Moderate', 'High', 'Critical')]$BreakOnSeverity = 'Low',
