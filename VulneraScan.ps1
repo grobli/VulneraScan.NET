@@ -1386,15 +1386,16 @@ function Format-AuditResult($AuditResult) {
 
     if ($Format -eq 'Text') {
         if ($AuditResult -is [SolutionAuditPlural]) {
-            $AuditResult | Select-Object -ExpandProperty Solutions | ForEach-Object {
-                if (!$_.Projects) { return }
+            $AuditResult `
+            | Select-Object -ExpandProperty Solutions `
+            | Select-Object -ExpandProperty Values `
+            | ForEach-Object {
                 Format-SolutionAuditAsText -SolutionAudit $_
                 Write-Output "`n".PadRight(106, '#')
             }
             return
         }
         else {
-            if (!$AuditResult.Projects) { return }
             Format-SolutionAuditAsText -SolutionAudit $AuditResult
             return
         }
