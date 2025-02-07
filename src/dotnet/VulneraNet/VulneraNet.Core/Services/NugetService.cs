@@ -1,21 +1,23 @@
 ﻿using System.Collections.Frozen;
+using System.Net.Http.Json;
 using VulneraNet.Core.Domain;
 using VulneraNet.Core.Domain.NuGet.Vulnerabilities;
 using VulneraNet.Core.Json;
 using VulneraNet.Core.Mappers;
 using VulneraNet.Core.Services.Interfaces;
-using VulneraNet.Core.Utilities.Http;
 using VulneraNet.Core.Utilities.Logging;
 
 namespace VulneraNet.Core.Services;
 
-public class NugetService(IResilientHttpClient httpClient, ILogger logger) : INugetService
+public class NugetService(HttpClient httpClient, ILoggerFactory loggerFactory) : INugetService
 {
     private readonly Uri _nugetVulnerabilityIndexUrl = new("https://api.nuget.org/v3/vulnerabilities/index.json");
     private readonly Uri _nugetIndexUrl = new("https://api.nuget.org/v3/index.json");
 
     private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private readonly ILogger _logger = loggerFactory.GetLogger<NugetService>();
 
+    private Task<FrozenDictionary<string, Vulnerability[]>>? _vulnerabilityDataTask;
     private FrozenDictionary<string, Vulnerability[]>? _vulnerabilityData;
 
     public async Task<IEnumerable<Vulnerability>> FindVulnerabilitiesAsync(PackageId packageId,
@@ -36,12 +38,30 @@ public class NugetService(IResilientHttpClient httpClient, ILogger logger) : INu
     private async ValueTask<FrozenDictionary<string, Vulnerability[]>> GetVulnerabilityDataAsync(
         CancellationToken cancellationToken)
     {
-        if (_vulnerabilityData is not null) return _vulnerabilityData;
-
         await _semaphore.WaitAsync(cancellationToken);
+
+        if (_vulnerabilityData is not null)
+        {
+            _semaphore.Release();
+            return _vulnerabilityData;
+        }
+
+        if (_vulnerabilityDataTask is not null && _vulnerabilityDataTask.IsFaulted)
+        {
+            _semaphore.Release();
+            return await ValueTask
+                .FromException<FrozenDictionary<string, Vulnerability[]>>(_vulnerabilityDataTask.Exception!);
+        }
+
+        _vulnerabilityDataTask ??= FetchVulnerabilitiesDataAsync(cancellationToken);
         try
         {
-            _vulnerabilityData ??= await FetchVulnerabilitiesDataAsync(cancellationToken);
+            _vulnerabilityData ??= await _vulnerabilityDataTask;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("Failed to fetch vulnerability data.", ex);
+            throw;
         }
         finally
         {
@@ -53,10 +73,12 @@ public class NugetService(IResilientHttpClient httpClient, ILogger logger) : INu
 
     private async Task<VulnerabilitiesIndex> FetchVulnerabilitiesIndexAsync(CancellationToken cancellationToken)
     {
-        var entries = await httpClient.GetAsync(_nugetVulnerabilityIndexUrl,
-            SourceGenerationContext.Default.VulnerabilitiesIndexEntryArray, cancellationToken);
-        VulnerabilitiesIndexEntry? baseEntry = default;
-        VulnerabilitiesIndexEntry? updateEntry = default;
+        _logger.LogInformation($"Fetching vulnerabilities data from {_nugetVulnerabilityIndexUrl}.");
+        
+        var entries = (await httpClient.GetFromJsonAsync(_nugetVulnerabilityIndexUrl,
+            SourceGenerationContext.Default.VulnerabilitiesIndexEntryArray, cancellationToken))!;
+        VulnerabilitiesIndexEntry? baseEntry = null;
+        VulnerabilitiesIndexEntry? updateEntry = null;
         foreach (var entry in entries)
         {
             if (entry.Name.Equals("base", StringComparison.InvariantCultureIgnoreCase))
@@ -75,18 +97,16 @@ public class NugetService(IResilientHttpClient httpClient, ILogger logger) : INu
     private async Task<FrozenDictionary<string, Vulnerability[]>> FetchVulnerabilitiesDataAsync(
         CancellationToken cancellationToken)
     {
-        logger.LogInformation<NugetService>($"Fetching vulnerabilities data from {_nugetIndexUrl}.");
-
         var index = await FetchVulnerabilitiesIndexAsync(cancellationToken);
 
-        var baseDataTask = httpClient.GetAsync(index.Base.Id,
+        var baseDataTask = httpClient.GetFromJsonAsync(index.Base.Id,
             SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry, cancellationToken);
-        var updateDataTask = httpClient.GetAsync(index.Update.Id,
+        var updateDataTask = httpClient.GetFromJsonAsync(index.Update.Id,
             SourceGenerationContext.Default.DictionaryStringListVulnerabilityEntry, cancellationToken);
         await Task.WhenAll(baseDataTask, updateDataTask);
 
-        var baseData = await baseDataTask;
-        var updateData = await updateDataTask;
+        var baseData = (await baseDataTask)!;
+        var updateData = (await updateDataTask)!;
 
         // merge update into base
         foreach (var (key, updateEntries) in updateData)

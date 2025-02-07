@@ -6,29 +6,35 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <InvariantGlobalization>true</InvariantGlobalization>
-        
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <VersionPrefix>0.1.0</VersionPrefix>
         <PackAsTool>true</PackAsTool>
-        <ToolCommandName>vulnera</ToolCommandName>
+        <ToolCommandName>vuget</ToolCommandName>
         <PackageOutputPath>./nupkg</PackageOutputPath>
+        <Authors>Mateusz Groblicki</Authors>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <Copyright>Mateusz Groblicki $([System.DateTime]::UtcNow.Year)</Copyright>
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="Cocona.Lite" Version="2.2.0" />
+        <PackageReference Include="Cocona.Lite" Version="2.2.0"/>
     </ItemGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\VulneraNet.Core\VulneraNet.Core.csproj" />
+        <ProjectReference Include="..\VulneraNet.Core\VulneraNet.Core.csproj"/>
     </ItemGroup>
 
     <ItemGroup>
-      <Compile Remove="nupkg\**" />
+        <Compile Remove="nupkg\**"/>
     </ItemGroup>
 
     <ItemGroup>
-      <EmbeddedResource Remove="nupkg\**" />
+        <EmbeddedResource Remove="nupkg\**"/>
     </ItemGroup>
 
     <ItemGroup>
-      <None Remove="nupkg\**" />
+        <None Remove="nupkg\**"/>
     </ItemGroup>
 </Project>

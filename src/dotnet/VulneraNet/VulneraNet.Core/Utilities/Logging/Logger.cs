@@ -1,49 +1,43 @@
 ﻿namespace VulneraNet.Core.Utilities.Logging;
 
-public class Logger : ILogger
+public interface ILogger
 {
-    private readonly object _lock = new();
+    void LogInformation(string message);
+    void LogDebug(string message);    
+    void LogError(string message, Exception? exception = null);
+    void LogWarning(string message);
+}
 
-    public Verbosity Verbosity { get; set; } = Verbosity.Info;
+public static class LoggerGlobalSettings
+{
+    public static Verbosity Verbosity { get; set; } = Verbosity.Info;
+}
 
-    public void LogInformation(string message)
+public class Logger<T> : ILogger
+{
+    public Verbosity Verbosity { get; set; } = LoggerGlobalSettings.Verbosity;
+
+    internal Logger()
     {
-        Log(message, Verbosity.Info, string.Empty, ConsoleColor.Blue);
     }
 
-    public void LogInformation<T>(string message) where T : class
+    public void LogInformation(string message)
     {
         Log(message, Verbosity.Info, typeof(T).Name, ConsoleColor.Blue);
     }
 
     public void LogDebug(string message)
     {
-        Log(message, Verbosity.Debug, string.Empty, ConsoleColor.DarkGray);
-    }
-
-    public void LogDebug<T>(string message) where T : class
-    {
         Log(message, Verbosity.Debug, typeof(T).Name, ConsoleColor.DarkGray);
     }
 
     public void LogError(string message, Exception? exception = null)
-    {
-        Log(message, Verbosity.Error, string.Empty, ConsoleColor.Red);
-        if (exception != null) Log(exception.Message, Verbosity.Error, string.Empty, ConsoleColor.Red);
-    }
-
-    public void LogError<T>(string message, Exception? exception = null) where T : class
     {
         Log(message, Verbosity.Error, typeof(T).Name, ConsoleColor.Red);
         if (exception != null) Log(exception.Message, Verbosity.Error, typeof(T).Name, ConsoleColor.Red);
     }
 
     public void LogWarning(string message)
-    {
-        Log(message, Verbosity.Warning, string.Empty, ConsoleColor.Yellow);
-    }
-
-    public void LogWarning<T>(string message) where T : class
     {
         Log(message, Verbosity.Warning, typeof(T).Name, ConsoleColor.Yellow);
     }
@@ -52,18 +46,16 @@ public class Logger : ILogger
     {
         if (Verbosity > logLevel) return;
 
-        lock (_lock)
+        Write(logLevel.ToString(), logLevelColor);
+        if (!string.IsNullOrWhiteSpace(context))
         {
-            Write(logLevel.ToString(), logLevelColor);
-            if (!string.IsNullOrWhiteSpace(context))
-            {
-                Write(" [", ConsoleColor.White);
-                Write(context);
-                Write("]", ConsoleColor.White);
-            }
-
-            WriteLine($" : {message}");
+            Write(" [", ConsoleColor.White);
+            Write(context);
+            Write("]", ConsoleColor.White);
         }
+
+        if (logLevel == Verbosity.Error) WriteLine($" : {message}", ConsoleColor.Red);
+        else WriteLine($" : {message}");
     }
 
     private static void Write(string text, ConsoleColor color)
